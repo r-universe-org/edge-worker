@@ -1,0 +1,14 @@
+{
+  "name": "r-universe-edge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare worker that rejects requests for nonexistent r-universe pages and counts hits per universe and package",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy"
+  },
+  "license": "MIT"
+}

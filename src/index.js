@@ -1,0 +1,123 @@
+// Cloudflare worker in front of {universe}.r-universe.dev, see README.md. It does two things:
+//  1. Reject requests for top-level pages that do not exist (e.g. from security scanners),
+//     using the allowlist of the universe from /api/allowlist: its packages and universe pages.
+//  2. Count hits per universe and package, in Workers Analytics Engine.
+// Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly.
+// Everything else goes to the backend unchanged. Responses for universes have a header
+// X-R-Universe-Edge: redirect, rejected, pass (allowed), or unchecked (no allowlist).
+
+const UNIVERSE_HOST = /^([a-z0-9-]+)\.r-universe\.dev$/i;
+
+// Package files: /src/contrib/{package}_{version}.tar.gz or /bin/{platform}/.../{package}_{version}.{zip,tgz,tar.gz}
+const DOWNLOAD = /^\/(?:src|bin\/([^/]+))\/.*\/([A-Za-z0-9.]+)_([^_/]+)\.(?:tar\.gz|tgz|zip)$/;
+
+// Package files by their hash, e.g. /src/contrib/{package}_{version}.tar.gz?sha256={hash}
+const SHA256 = /^[0-9a-f]{64}$/;
+const STORAGE = 'https://r2.ropensci.org';
+
+const LIST_TTL = 60 * 1000; // milliseconds to keep the allowlist of a universe in memory
+
+// universe -> {expires, promise}. The promise resolves to {packages, universe}: Sets of
+// lowercase names, null if the universe does not exist, or undefined if it could not be loaded.
+const lists = new Map();
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const universe = url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
+    if (!universe || (request.method !== 'GET' && request.method !== 'HEAD')) {
+      return fetch(request);
+    }
+
+    // Downloads by hash need neither the allowlist nor the backend
+    const sha256 = url.searchParams.get('sha256');
+    if (sha256 && SHA256.test(sha256)) {
+      const download = describeDownload(url.pathname);
+      if (download && request.method === 'GET') {
+        record(env, universe, download, 301);
+      }
+      return mark(Response.redirect(`${STORAGE}/${sha256}`, 301), 'redirect');
+    }
+
+    // 1. Reject what does not exist. If the allowlist could not be loaded, let the backend decide.
+    // The allowlist is lowercase: the frontend redirects other cases of package names.
+    const allowed = await getAllowlist(universe, url.origin);
+    const page = url.pathname.split('/')[1].toLowerCase();
+    if (allowed === null) {
+      return mark(notFound(`No packages found for this owner or maintainer: ${universe}`), 'rejected');
+    }
+    if (allowed && !allowed.universe.has(page) && !allowed.packages.has(page)) {
+      return mark(notFound(`Page not found: /${page}`), 'rejected');
+    }
+
+    // 2. Count the hit
+    const response = await fetch(request);
+    if (allowed && request.method === 'GET') {
+      record(env, universe, describe(url.pathname, page, allowed), response.status);
+    }
+    return mark(response, allowed ? 'pass' : 'unchecked');
+  }
+};
+
+// Copy the response, because the headers of fetched and redirect responses are immutable
+function mark(response, status) {
+  const copy = new Response(response.body, response);
+  copy.headers.set('X-R-Universe-Edge', status);
+  return copy;
+}
+
+// One data point: [universe, type, package, version, page or platform], and the status
+function record(env, universe, hit, status) {
+  env.HITS?.writeDataPoint({ indexes: [universe], blobs: [universe, ...hit], doubles: [status] });
+}
+
+// What a request is about: [type, package, version, page or platform]
+function describe(path, page, allowed) {
+  const download = describeDownload(path);
+  if (download) {
+    return download;
+  }
+  if (allowed.universe.has(page)) {
+    return ['universe', '', '', `/${page}`]; // e.g. /builds, /api, or / for the homepage
+  }
+  return ['package', page, '', ''];
+}
+
+function describeDownload(path) {
+  const download = path.match(DOWNLOAD);
+  if (!download) {
+    return null;
+  }
+  const [, platform = 'src', pkg, version] = download;
+  return ['download', pkg.toLowerCase(), version, platform];
+}
+
+function getAllowlist(universe, origin) {
+  const cached = lists.get(universe);
+  if (cached && Date.now() < cached.expires) {
+    return cached.promise;
+  }
+  const promise = loadAllowlist(origin).catch(() => undefined);
+  lists.set(universe, { expires: Date.now() + LIST_TTL, promise });
+  return promise;
+}
+
+async function loadAllowlist(origin) {
+  const response = await fetch(`${origin}/api/allowlist`);
+  if (response.status === 404 && (await response.text()).startsWith('Error: No packages found')) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} for /api/allowlist`);
+  }
+  const data = await response.json();
+  const lowercase = (names) => new Set(names.map(name => name.toLowerCase())); // already, to be safe
+  return { packages: lowercase(data.packages), universe: lowercase(data.universe) };
+}
+
+function notFound(message) {
+  return new Response(`${message}\n`, {
+    status: 404,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=60' }
+  });
+}

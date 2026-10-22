@@ -4,8 +4,13 @@ import worker from '../src/index.js';
 
 // A fake backend: /api/allowlist returns the allowlist, other pages return 200 (downloads a 302)
 let list, calls, points;
-globalThis.fetch = async (input) => {
+let sqlRows, sqlQueries;
+globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : input);
+  if (url.hostname === 'api.cloudflare.com') { // fake SQL API of Analytics Engine
+    sqlQueries.push({ url: url.href, auth: init.headers.Authorization, sql: init.body });
+    return typeof sqlRows === 'function' ? sqlRows() : Response.json({ data: sqlRows });
+  }
   calls.push(url.pathname);
   if (url.pathname === '/api/allowlist') {
     return typeof list === 'function' ? list() : Response.json(list);
@@ -22,7 +27,15 @@ beforeEach(() => {
   universe++;
   list = { packages: ['data.table', 'dplyr', 'rappArmor', 'tidyr'], universe: ['', 'api', 'bin', 'builds', 'card.png', 'src'] };
   calls = []; points = [];
+  sqlRows = []; sqlQueries = [];
 });
+
+// A fake edge cache
+const cache = new Map();
+globalThis.caches = { default: {
+  match: async (key) => cache.get(key.url)?.clone(),
+  put: async (key, response) => { cache.set(key.url, response); }
+} };
 
 const env = { HITS: { writeDataPoint: (point) => points.push(point) } }; // fake Analytics Engine
 function get(path, method = 'GET', host = `test${universe}.r-universe.dev`) {
@@ -205,4 +218,94 @@ test('passes invalid hashes to the backend', async () => {
     assert.equal((await get(`/src/contrib/dplyr_1.1.4.tar.gz?sha256=${hash}`)).status, 302);
   }
   assert.deepEqual(calls.filter(x => x !== '/api/allowlist'), Array(3).fill('/src/contrib/dplyr_1.1.4.tar.gz'));
+});
+
+// The stats need the SQL API token, and the cache is filled in the background (waitUntil)
+const statsEnv = { ...env, ANALYTICS_ACCOUNT: 'acc', ANALYTICS_TOKEN: 'secret' };
+async function getStats(path, host = `test${universe}.r-universe.dev`) {
+  const waits = [];
+  const res = await worker.fetch(new Request(`https://${host}${path}`), statsEnv, { waitUntil: (p) => waits.push(p) });
+  await Promise.all(waits);
+  return res;
+}
+
+test('serves downloads per package and platform', async () => {
+  sqlRows = [
+    { package: 'dplyr', platform: 'src', count: '3' },
+    { package: 'dplyr', platform: 'windows', count: '5' },
+    { package: 'tidyr', platform: 'linux', count: '10' }
+  ];
+  const res = await getStats('/cf/downloads?days=7');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('X-R-Universe-Edge'), 'stats');
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'), '*');
+  assert.deepEqual(await res.json(), {
+    universe: `test${universe}`, days: 7, downloads: 18, packages: [
+      { package: 'tidyr', downloads: 10, platforms: { linux: 10 } },
+      { package: 'dplyr', downloads: 8, platforms: { src: 3, windows: 5 } }
+    ]
+  });
+  const [q] = sqlQueries;
+  assert.equal(q.url, 'https://api.cloudflare.com/client/v4/accounts/acc/analytics_engine/sql');
+  assert.equal(q.auth, 'Bearer secret');
+  assert.match(q.sql, new RegExp(`index1 = 'test${universe}' AND blob2 = 'download'`));
+  assert.match(q.sql, /INTERVAL '7' DAY/);
+  assert.ok(!calls.includes('/cf/downloads')); // not from the backend
+  assert.equal(points.length, 0); // and not counted
+});
+
+test('serves views of universe pages and package landing pages', async () => {
+  sqlRows = [
+    { type: 'universe', package: '', page: '/', count: '20' },
+    { type: 'universe', package: '', page: '/builds', count: '5' },
+    { type: 'universe', package: '', page: '/api/*', count: '1000' }, // not a page
+    { type: 'package', package: 'dplyr', page: '/', count: '7' },
+    { type: 'package', package: 'tidyr', page: '/', count: '9' }
+  ];
+  const res = await getStats('/CF/pageviews/');
+  assert.deepEqual(await res.json(), {
+    universe: `test${universe}`, days: 30, pageviews: 41, pages: { '/': 20, '/builds': 5 }, packages: [
+      { package: 'tidyr', pageviews: 9 }, { package: 'dplyr', pageviews: 7 }
+    ]
+  });
+  assert.match(sqlQueries[0].sql, /blob2 = 'package' AND blob5 = '\/'/);
+});
+
+test('caches stats per universe, type and days', async () => {
+  for (const path of ['/cf/downloads', '/cf/downloads?days=30', '/cf/downloads?days=abc', '/cf/downloads?days=500']) {
+    assert.equal((await getStats(path)).status, 200);
+  }
+  await getStats('/cf/pageviews');
+  assert.deepEqual(sqlQueries.map(q => q.sql.match(/INTERVAL '(\d+)'/)[1]), ['30', '90', '30']);
+  const res = await getStats('/cf/downloads', `other${universe}.r-universe.dev`);
+  assert.equal((await res.json()).universe, `other${universe}`);
+  assert.equal(sqlQueries.length, 4);
+});
+
+test('stats errors are not cached', async () => {
+  sqlRows = () => new Response('rate limited', { status: 429 });
+  const res = await getStats('/cf/downloads');
+  assert.equal(res.status, 502);
+  assert.match(await res.text(), /HTTP 429/);
+  sqlRows = [];
+  assert.equal((await getStats('/cf/downloads')).status, 200);
+  assert.equal(sqlQueries.length, 2);
+});
+
+test('stats for unknown types, universes, and without a token', async () => {
+  assert.equal((await getStats('/cf/other')).status, 404);
+  assert.equal((await getStats('/cf/downloads/x')).status, 404);
+  const res = await worker.fetch(new Request(`https://test${universe}.r-universe.dev/cf/pageviews`), env);
+  assert.equal(res.status, 503);
+  universe++;
+  list = () => new Response('Error: No packages found for this owner or maintainer: test\n', { status: 404 });
+  assert.equal((await getStats('/cf/downloads')).status, 404);
+  assert.equal(sqlQueries.length, 0);
+});
+
+test('a package named cf is not shadowed by the stats', async () => {
+  list.packages.push('cf');
+  const res = await getStats('/cf/downloads');
+  assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
+  assert.deepEqual(sqlQueries, []);
 });

@@ -13,3 +13,8 @@ routes = [
 [[analytics_engine_datasets]]
 binding = "HITS"
 dataset = "r_universe_hits"
+
+# For the stats on /cf/downloads and /cf/pageviews, which read the hits with the SQL API. The
+# token (Account Analytics: Read) is a secret: npx wrangler secret put ANALYTICS_TOKEN
+[vars]
+ANALYTICS_ACCOUNT = "3fcdf4a2e34a7a2e74fc8686b68acea1"

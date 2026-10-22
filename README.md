@@ -84,6 +84,25 @@ curl "https://api.cloudflare.com/client/v4/accounts/3fcdf4a2e34a7a2e74fc8686b68a
 Use `blob2 = 'package' AND blob5 = '/'` for views of package landing pages, group by `blob1` and `blob2` for hits per
 universe and type, or by `blob5` for downloads per platform.
 
+## Stats
+
+The hits of a universe are public on two endpoints of the worker (in `src/stats.js`), which
+query the SQL API, so that the frontend and other clients need no token:
+
+ - `/cf/downloads?days=30`: downloads per package and platform, as above.
+ - `/cf/pageviews?days=30`: views of the universe pages that are html pages (`/`, `/builds`,
+   `/packages`, `/badges`, `/api`, `/datasets`, `/contributors`, `/articles`) and of the
+   landing pages of the packages, with status 200 or 304.
+
+For example https://jeroen.r-universe.dev/cf/downloads. `days` is 1 to 90 (default 30).
+Package names are lowercase. Responses are cached at the edge for an hour (per data center),
+also in browsers, and allow CORS. Errors are not cached. If a universe has a package named
+`cf`, its page is served instead.
+
+The SQL API requires an API token with *Account Analytics: Read*, set as a secret of the
+worker: `npx wrangler secret put ANALYTICS_TOKEN`. The account is the variable
+`ANALYTICS_ACCOUNT` in `wrangler.toml`. Without them the endpoints return 503.
+
 ## Deploy
 
 ```sh

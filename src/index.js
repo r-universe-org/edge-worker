@@ -1,10 +1,13 @@
 // Cloudflare worker in front of {universe}.r-universe.dev, see README.md. It does two things:
 //  1. Reject requests for top-level pages that do not exist (e.g. from security scanners),
 //     using the allowlist of the universe from /api/allowlist: its packages and universe pages.
-//  2. Count hits per universe and package, in Workers Analytics Engine.
+//  2. Count hits per universe and package, in Workers Analytics Engine. The stats are public
+//     on /cf/downloads and /cf/pageviews, see stats.js.
 // Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, and a
 // known crawler fleet is blocked. Everything else goes to the backend unchanged. Responses have
-// a header X-R-Universe-Edge: blocked, redirect, rejected, pass (allowed), or unchecked (no allowlist).
+// a header X-R-Universe-Edge: blocked, redirect, rejected, stats, pass (allowed), or unchecked (no allowlist).
+
+import { stats } from './stats.js';
 
 const UNIVERSE_HOST = /^([a-z0-9-]+)\.r-universe\.dev$/i;
 
@@ -63,6 +66,9 @@ export default {
     const page = url.pathname.split('/')[1].toLowerCase();
     if (allowed === null) {
       return mark(notFound(`No packages found for this owner or maintainer: ${universe}`), 'rejected');
+    }
+    if (page === 'cf' && !allowed?.packages.has('cf')) {
+      return mark(await stats(request, env, ctx, universe), 'stats');
     }
     if (allowed && !allowed.universe.has(page) && !allowed.packages.has(page)) {
       return mark(notFound(`Page not found: /${page}`), 'rejected');

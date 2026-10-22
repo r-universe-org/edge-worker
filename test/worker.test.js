@@ -4,10 +4,12 @@ import worker from '../src/index.js';
 
 // A fake backend: /api/allowlist returns the allowlist, other pages return 200 (downloads a 302)
 let list, calls, points;
-globalThis.fetch = async (input) => {
+let listOptions;
+globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : input);
   calls.push(url.pathname);
   if (url.pathname === '/api/allowlist') {
+    listOptions = init;
     return typeof list === 'function' ? list() : Response.json(list);
   }
   if (/\.(tar\.gz|tgz|zip)$/.test(url.pathname)) {
@@ -38,6 +40,14 @@ test('passes packages and pages to the backend', async () => {
   assert.equal(calls.filter(x => x === '/api/allowlist').length, 1); // loaded once
 });
 
+test('caches the allowlist at the edge, but not errors', async () => {
+  await get('/');
+  const ttl = listOptions.cf.cacheTtlByStatus;
+  assert.equal(ttl['200-299'], 300);
+  assert.equal(ttl['404'], 300);
+  assert.ok(ttl['300-403'] < 0 && ttl['405-599'] < 0);
+});
+
 test('rejects pages that do not exist', async () => {
   for (const path of ['/wp-admin/setup.php', '/.env', '/ggplot2', '/packages']) {
     const res = await get(path);
@@ -61,6 +71,28 @@ test('passes everything when the allowlist can not be loaded', async () => {
   const res = await get('/wp-admin');
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('X-R-Universe-Edge'), 'unchecked');
+});
+
+test('keeps the allowlist for 5 minutes, but retries a failure after 1 minute', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const loads = () => calls.filter(x => x === '/api/allowlist').length;
+  await get('/');
+  t.mock.timers.tick(299 * 1000);
+  await get('/');
+  assert.equal(loads(), 1);
+  t.mock.timers.tick(2 * 1000);
+  await get('/');
+  assert.equal(loads(), 2);
+
+  list = () => new Response('Bad gateway', { status: 502 });
+  t.mock.timers.tick(301 * 1000);
+  await get('/'); // fails
+  t.mock.timers.tick(59 * 1000);
+  await get('/');
+  assert.equal(loads(), 3);
+  t.mock.timers.tick(2 * 1000);
+  await get('/');
+  assert.equal(loads(), 4);
 });
 
 test('passes other hosts and methods without loading the allowlist', async () => {

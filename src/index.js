@@ -15,7 +15,12 @@ const DOWNLOAD = /^\/(?:src|bin\/([^/]+))\/.*\/([A-Za-z0-9.]+)_([^_/]+)\.(?:tar\
 const SHA256 = /^[0-9a-f]{64}$/;
 const STORAGE = 'https://r2.ropensci.org';
 
-const LIST_TTL = 60 * 1000; // milliseconds to keep the allowlist of a universe in memory
+const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes rarely)
+const RETRY_TTL = 60; // seconds before loading it again after a failure
+
+// The memory is per worker instance, so /api/allowlist is also cached at the edge (per data
+// center) for all instances: the list (200), and nonexistent universes (404), not errors.
+const LIST_CACHE = { cacheTtlByStatus: { '200-299': LIST_TTL, '404': LIST_TTL, '300-403': -1, '405-599': -1 } };
 
 // universe -> {expires, promise}. The promise resolves to {packages, universe}: Sets of
 // lowercase names, null if the universe does not exist, or undefined if it could not be loaded.
@@ -97,13 +102,17 @@ function getAllowlist(universe, origin) {
   if (cached && Date.now() < cached.expires) {
     return cached.promise;
   }
-  const promise = loadAllowlist(origin).catch(() => undefined);
-  lists.set(universe, { expires: Date.now() + LIST_TTL, promise });
-  return promise;
+  const entry = { expires: Date.now() + LIST_TTL * 1000 };
+  entry.promise = loadAllowlist(origin).catch(() => {
+    entry.expires = Math.min(entry.expires, Date.now() + RETRY_TTL * 1000);
+    return undefined;
+  });
+  lists.set(universe, entry);
+  return entry.promise;
 }
 
 async function loadAllowlist(origin) {
-  const response = await fetch(`${origin}/api/allowlist`);
+  const response = await fetch(`${origin}/api/allowlist`, { cf: LIST_CACHE });
   if (response.status === 404 && (await response.text()).startsWith('Error: No packages found')) {
     return null;
   }

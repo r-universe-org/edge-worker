@@ -18,8 +18,13 @@ It does two things, and passes everything else to the backend unchanged:
 
 The allowlist comes from `/api/allowlist` of the universe (for example
 https://jeroen.r-universe.dev/api/allowlist), with separate lists of `packages` and
-`universe` pages. It is kept in memory for a minute. If it can not be loaded, all requests
-are passed through (for that minute), and not counted. Other hosts (`r-universe.dev`, vhosts
+`universe` pages. It changes rarely (only when packages are added or removed), so it is
+kept in memory for 5 minutes. Because that memory is per worker instance, the response of
+`/api/allowlist` is also cached at the edge for 5 minutes (in each Cloudflare data center, for
+all instances); this applies to the list (200) and to universes that do not exist (404), but
+not to errors. A new package or universe can therefore take up to 10 minutes to become
+reachable. If the allowlist can not be loaded, all requests are passed through and not
+counted, and it is loaded again after a minute. Other hosts (`r-universe.dev`, vhosts
 like `*.ropensci.org`) and methods other than GET/HEAD are always passed through.
 
 To see what the worker did, responses for GET/HEAD requests on a universe have a header

@@ -29,10 +29,6 @@ const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes
 const RETRY_TTL = 60; // seconds before loading it again after a failure
 const STALE_TTL = 3600; // seconds to keep answering with an expired allowlist while it reloads
 
-// The memory is per worker instance, so /api/allowlist is also cached at the edge (per data
-// center) for all instances: the list (200), and nonexistent universes (404), not errors.
-const LIST_CACHE = { cacheTtlByStatus: { '200-299': LIST_TTL, '404': LIST_TTL, '300-403': -1, '405-599': -1 } };
-
 // universe -> {expires, stale, promise}. The promise resolves to {packages, universe}: Sets of
 // lowercase names, null if the universe does not exist, or undefined if it could not be loaded.
 // Until `stale`, an expired allowlist is still used while a new one loads in the background.
@@ -150,7 +146,7 @@ function newEntry(list) {
 }
 
 async function loadAllowlist(origin) {
-  const response = await fetch(`${origin}/api/allowlist`, { cf: LIST_CACHE });
+  const response = await fetch(`${origin}/api/allowlist`);
   if (response.status === 404 && (await response.text()).startsWith('Error: No packages found')) {
     return null;
   }

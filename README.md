@@ -25,10 +25,10 @@ https://jeroen.r-universe.dev/api/allowlist), with separate lists of `packages` 
 `universe` pages. It changes rarely (only when packages are added or removed), so it is
 kept in memory for 5 minutes. After that it is reloaded in the background
 (stale-while-revalidate): requests keep using the old allowlist until the new one is loaded,
-so they do not wait for it, unless the old one is more than an hour old. Because that memory is per worker instance, the response of
-`/api/allowlist` is also cached at the edge for 5 minutes (in each Cloudflare data center, for
-all instances); this applies to the list (200) and to universes that do not exist (404), but
-not to errors. A new package or universe can therefore take up to 10 minutes to become
+so they do not wait for it, unless the old one is more than an hour old. Because that memory
+is per worker instance, `/api/allowlist` is also cached at the edge (in each Cloudflare data
+center, for all instances), as set by the `Cache-Control` header of the frontend: 5 minutes,
+with stale-while-revalidate. A new package or universe can therefore take up to 10 minutes to become
 reachable. If the allowlist can not be loaded, all requests are passed through and not
 counted, and it is loaded again after a minute. Other hosts (`r-universe.dev`, vhosts
 like `*.ropensci.org`) and methods other than GET/HEAD are always passed through.

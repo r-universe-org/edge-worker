@@ -4,12 +4,10 @@ import worker from '../src/index.js';
 
 // A fake backend: /api/allowlist returns the allowlist, other pages return 200 (downloads a 302)
 let list, calls, points;
-let listOptions;
-globalThis.fetch = async (input, init) => {
+globalThis.fetch = async (input) => {
   const url = new URL(input instanceof Request ? input.url : input);
   calls.push(url.pathname);
   if (url.pathname === '/api/allowlist') {
-    listOptions = init;
     return typeof list === 'function' ? list() : Response.json(list);
   }
   if (/\.(tar\.gz|tgz|zip)$/.test(url.pathname)) {
@@ -38,14 +36,6 @@ test('passes packages and pages to the backend', async () => {
     assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
   }
   assert.equal(calls.filter(x => x === '/api/allowlist').length, 1); // loaded once
-});
-
-test('caches the allowlist at the edge, but not errors', async () => {
-  await get('/');
-  const ttl = listOptions.cf.cacheTtlByStatus;
-  assert.equal(ttl['200-299'], 300);
-  assert.equal(ttl['404'], 300);
-  assert.ok(ttl['300-403'] < 0 && ttl['405-599'] < 0);
 });
 
 test('rejects pages that do not exist', async () => {

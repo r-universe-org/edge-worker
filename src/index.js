@@ -152,7 +152,9 @@ function newEntry(list) {
 }
 
 async function loadAllowlist(origin) {
-  const response = await fetch(`${origin}/api/allowlist`);
+  // ?v= is only the key in the edge cache: bump it when the Cache-Control of the frontend
+  // changes, because Cloudflare keeps the headers of cached pages when revalidating them.
+  const response = await fetch(`${origin}/api/allowlist?v=2`);
   if (response.status === 404 && (await response.text()).startsWith('Error: No packages found')) {
     return null;
   }

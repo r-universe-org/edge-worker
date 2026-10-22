@@ -2,9 +2,9 @@
 //  1. Reject requests for top-level pages that do not exist (e.g. from security scanners),
 //     using the allowlist of the universe from /api/allowlist: its packages and universe pages.
 //  2. Count hits per universe and package, in Workers Analytics Engine.
-// Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly.
-// Everything else goes to the backend unchanged. Responses for universes have a header
-// X-R-Universe-Edge: redirect, rejected, pass (allowed), or unchecked (no allowlist).
+// Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, and a
+// known crawler fleet is blocked. Everything else goes to the backend unchanged. Responses have
+// a header X-R-Universe-Edge: blocked, redirect, rejected, pass (allowed), or unchecked (no allowlist).
 
 const UNIVERSE_HOST = /^([a-z0-9-]+)\.r-universe\.dev$/i;
 
@@ -14,6 +14,16 @@ const DOWNLOAD = /^\/(?:src|bin\/([^/]+))\/.*\/([A-Za-z0-9.]+)_([^_/]+)\.(?:tar\
 // Package files by their hash, e.g. /src/contrib/{package}_{version}.tar.gz?sha256={hash}
 const SHA256 = /^[0-9a-f]{64}$/;
 const STORAGE = 'https://r2.ropensci.org';
+
+// A crawler fleet that downloads every dataset in every format, overloading the data export
+// server (October 2026). Its user agent is that of a real browser, so it is only blocked from
+// hosting networks (by ASN, mostly Hetzner, netcup and OVH), not from home and mobile ISPs.
+const CRAWLER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0';
+const HOSTING_ASNS = new Set([
+  8560, 9009, 11798, 11878, 14061, 16276, 16509, 24940, 26666, 28753, 29066, 31898, 32489,
+  36352, 41564, 42708, 46475, 49981, 51167, 51430, 53667, 57433, 60068, 61272, 63473, 197540,
+  205548, 206804, 206996, 208172, 212238, 213881, 214677, 214996, 393577
+]);
 
 const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes rarely)
 const RETRY_TTL = 60; // seconds before loading it again after a failure
@@ -28,8 +38,13 @@ const lists = new Map();
 
 export default {
   async fetch(request, env) {
+    if (isCrawler(request)) {
+      return mark(new Response('Automated traffic from this network is blocked\n', {
+        status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      }), 'blocked');
+    }
     const url = new URL(request.url);
-    const universe = url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
+    const universe =url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
     if (!universe || (request.method !== 'GET' && request.method !== 'HEAD')) {
       return fetch(request);
     }
@@ -63,6 +78,10 @@ export default {
     return mark(response, allowed ? 'pass' : 'unchecked');
   }
 };
+
+function isCrawler(request) {
+  return request.headers.get('User-Agent') === CRAWLER_AGENT && HOSTING_ASNS.has(request.cf?.asn);
+}
 
 // Copy the response, because the headers of fetched and redirect responses are immutable
 function mark(response, status) {

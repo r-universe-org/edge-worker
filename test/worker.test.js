@@ -95,6 +95,24 @@ test('keeps the allowlist for 5 minutes, but retries a failure after 1 minute', 
   assert.equal(loads(), 4);
 });
 
+test('blocks the crawler fleet from hosting networks only', async () => {
+  const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0';
+  const visit = (asn, ua = agent, host = `test${universe}.r-universe.dev`) => {
+    const request = new Request(`https://${host}/dplyr/data/x/csv`, { headers: { 'User-Agent': ua } });
+    Object.defineProperty(request, 'cf', { value: { asn } }); // set by Cloudflare
+    return worker.fetch(request, env);
+  };
+  for (const res of [await visit(24940), await visit(16276, agent, 'r-universe.dev')]) {
+    assert.equal(res.status, 403);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'blocked');
+  }
+  assert.deepEqual(calls, []);
+  assert.equal(points.length, 0);
+  assert.equal((await visit(3320)).status, 200); // home ISP
+  assert.equal((await visit(24940, agent.replaceAll('148', '149'))).status, 200); // other browser
+  assert.equal((await visit(undefined)).status, 200);
+});
+
 test('passes other hosts and methods without loading the allowlist', async () => {
   await get('/wp-admin', 'GET', 'r-universe.dev');
   await get('/wp-admin', 'POST');

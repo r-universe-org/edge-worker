@@ -1,7 +1,7 @@
 # r-universe-edge
 
 Cloudflare worker in front of `{universe}.r-universe.dev`. All code is in `src/index.js`.
-It does two things, and passes everything else to the backend unchanged:
+It does the following, and passes everything else to the backend unchanged:
 
  - **Reject pages that do not exist**, without the backend. The first path segment must be
    in the allowlist of the universe: one of its packages, or a universe page (`/`, `/api`,
@@ -10,6 +10,10 @@ It does two things, and passes everything else to the backend unchanged:
    universe that does not exist gets a 404. This removes the noise from security scanners
    and scripts that try random paths.
  - **Count hits** per universe and package, see below.
+ - **Block a crawler fleet**: a fleet that downloads every dataset in every format and
+   overloaded the data export server (October 2026). It uses the user agent of a real
+   browser (Firefox 148 on Windows), so it gets a 403 only from hosting networks: the ASNs in
+   `HOSTING_ASNS` in `src/index.js` (from `request.cf.asn`), not from home and mobile ISPs.
  - **Redirect downloads by hash**: requests with a `?sha256={hash}` parameter (64 hex
    characters) get a 301 to `https://r2.ropensci.org/{hash}`, without the allowlist or the
    backend. This relieves the backend of the many concurrent package downloads (it replaces
@@ -28,7 +32,7 @@ counted, and it is loaded again after a minute. Other hosts (`r-universe.dev`, v
 like `*.ropensci.org`) and methods other than GET/HEAD are always passed through.
 
 To see what the worker did, responses for GET/HEAD requests on a universe have a header
-`X-R-Universe-Edge`: `redirect` (download by hash), `rejected` (404 from the worker), `pass`
+`X-R-Universe-Edge` (also `blocked` for the crawler fleet, on any request): `redirect` (download by hash), `rejected` (404 from the worker), `pass`
 (allowed, from the backend), or `unchecked` (from the backend, the allowlist could not be
 loaded). Responses without the header did not go through the worker.
 

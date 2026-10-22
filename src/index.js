@@ -27,24 +27,26 @@ const HOSTING_ASNS = new Set([
 
 const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes rarely)
 const RETRY_TTL = 60; // seconds before loading it again after a failure
+const STALE_TTL = 3600; // seconds to keep answering with an expired allowlist while it reloads
 
 // The memory is per worker instance, so /api/allowlist is also cached at the edge (per data
 // center) for all instances: the list (200), and nonexistent universes (404), not errors.
 const LIST_CACHE = { cacheTtlByStatus: { '200-299': LIST_TTL, '404': LIST_TTL, '300-403': -1, '405-599': -1 } };
 
-// universe -> {expires, promise}. The promise resolves to {packages, universe}: Sets of
+// universe -> {expires, stale, promise}. The promise resolves to {packages, universe}: Sets of
 // lowercase names, null if the universe does not exist, or undefined if it could not be loaded.
+// Until `stale`, an expired allowlist is still used while a new one loads in the background.
 const lists = new Map();
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (isCrawler(request)) {
       return mark(new Response('Automated traffic from this network is blocked\n', {
         status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' }
       }), 'blocked');
     }
     const url = new URL(request.url);
-    const universe =url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
+    const universe = url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
     if (!universe || (request.method !== 'GET' && request.method !== 'HEAD')) {
       return fetch(request);
     }
@@ -61,7 +63,7 @@ export default {
 
     // 1. Reject what does not exist. If the allowlist could not be loaded, let the backend decide.
     // The allowlist is lowercase: the frontend redirects other cases of package names.
-    const allowed = await getAllowlist(universe, url.origin);
+    const allowed = await getAllowlist(universe, url.origin, ctx);
     const page = url.pathname.split('/')[1].toLowerCase();
     if (allowed === null) {
       return mark(notFound(`No packages found for this owner or maintainer: ${universe}`), 'rejected');
@@ -101,10 +103,13 @@ function describe(path, page, allowed) {
   if (download) {
     return download;
   }
+  const rest = path.split('/').slice(2).filter(Boolean);
   if (allowed.universe.has(page)) {
-    return ['universe', '', '', `/${page}`]; // e.g. /builds, /api, or / for the homepage
+    // The page itself (/ for the homepage, /builds, /api), or /api/* for anything below it
+    return ['universe', '', '', rest.length ? `/${page}/*` : `/${page}`];
   }
-  return ['package', page, '', ''];
+  // The landing page of the package (/), or the first part below it (/doc, /badges, ...)
+  return ['package', page, '', `/${rest[0]?.toLowerCase() ?? ''}`];
 }
 
 function describeDownload(path) {
@@ -116,18 +121,32 @@ function describeDownload(path) {
   return ['download', pkg.toLowerCase(), version, platform];
 }
 
-function getAllowlist(universe, origin) {
+function getAllowlist(universe, origin, ctx) {
   const cached = lists.get(universe);
   if (cached && Date.now() < cached.expires) {
     return cached.promise;
   }
-  const entry = { expires: Date.now() + LIST_TTL * 1000 };
-  entry.promise = loadAllowlist(origin).catch(() => {
+  if (cached && Date.now() < cached.stale) {
+    // Stale-while-revalidate: reload in the background, and use the new list once it is loaded.
+    // Until then (or a minute after a failure) the old list is used without loading it again.
+    cached.expires = Date.now() + RETRY_TTL * 1000;
+    const reload = loadAllowlist(origin).then(list => lists.set(universe, newEntry(list)), () => {});
+    ctx?.waitUntil(reload);
+    return cached.promise;
+  }
+  const entry = newEntry(loadAllowlist(origin));
+  entry.promise = entry.promise.catch(() => {
     entry.expires = Math.min(entry.expires, Date.now() + RETRY_TTL * 1000);
+    entry.stale = 0;
     return undefined;
   });
   lists.set(universe, entry);
   return entry.promise;
+}
+
+function newEntry(list) {
+  const now = Date.now();
+  return { expires: now + LIST_TTL * 1000, stale: now + STALE_TTL * 1000, promise: Promise.resolve(list) };
 }
 
 async function loadAllowlist(origin) {

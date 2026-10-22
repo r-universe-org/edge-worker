@@ -23,7 +23,9 @@ It does the following, and passes everything else to the backend unchanged:
 The allowlist comes from `/api/allowlist` of the universe (for example
 https://jeroen.r-universe.dev/api/allowlist), with separate lists of `packages` and
 `universe` pages. It changes rarely (only when packages are added or removed), so it is
-kept in memory for 5 minutes. Because that memory is per worker instance, the response of
+kept in memory for 5 minutes. After that it is reloaded in the background
+(stale-while-revalidate): requests keep using the old allowlist until the new one is loaded,
+so they do not wait for it, unless the old one is more than an hour old. Because that memory is per worker instance, the response of
 `/api/allowlist` is also cached at the edge for 5 minutes (in each Cloudflare data center, for
 all instances); this applies to the list (200) and to universes that do not exist (404), but
 not to errors. A new package or universe can therefore take up to 10 minutes to become
@@ -49,7 +51,7 @@ dataset `r_universe_hits` (binding `HITS` in `wrangler.toml`):
 | `blob2`   | type: `download`, `package` or `universe` (see below) |
 | `blob3`   | package (lowercase), empty for universe pages |
 | `blob4`   | version, for downloads only |
-| `blob5`   | for downloads the platform (`src`, `windows`, `macosx`, `linux`, `emscripten`), for universe pages the page (`/`, `/builds`, `/api`, ...) |
+| `blob5`   | for downloads the platform (`src`, `windows`, `macosx`, `linux`, `emscripten`), for packages and universe pages the page (see below) |
 | `double1` | HTTP status of the response |
 
 The types are:
@@ -57,9 +59,13 @@ The types are:
  - `download`: a package file, `/src/contrib/{package}_{version}.tar.gz` or
    `/bin/{platform}/.../{package}_{version}.{zip,tgz,tar.gz}`. A successful download is a
    redirect to the file storage: 302 from the backend, or 301 for downloads by hash.
- - `package`: a package page, e.g. `/dplyr` or `/dplyr/doc/manual.html`.
- - `universe`: any other page of the universe, e.g. `/builds`, `/packages`, `/api/...`, and
-   the repository indexes such as `/src/contrib/PACKAGES.gz`.
+ - `package`: a package page. The page is `/` for the landing page (`/dplyr`), otherwise
+   the first part of the path below the package, e.g. `/doc` for `/dplyr/doc/manual.html`
+   or `/badges` for `/dplyr/badges/version`.
+ - `universe`: any other page of the universe. The page is the page itself, e.g. `/` for the
+   homepage, `/builds`, `/packages` or `/api`, or with `/*` for anything below it, e.g.
+   `/api/*` for the API and `/src/*` for the repository indexes such as
+   `/src/contrib/PACKAGES.gz`.
 
 Data is kept for three months. At high volume Analytics Engine samples data points, so
 count with `SUM(_sample_interval)` rather than `COUNT()`. Query with the
@@ -75,7 +81,7 @@ curl "https://api.cloudflare.com/client/v4/accounts/3fcdf4a2e34a7a2e74fc8686b68a
     GROUP BY universe, package ORDER BY downloads DESC LIMIT 50 FORMAT JSON"
 ```
 
-Use `blob2 = 'package'` for views of package pages, group by `blob1` and `blob2` for hits per
+Use `blob2 = 'package' AND blob5 = '/'` for views of package landing pages, group by `blob1` and `blob2` for hits per
 universe and type, or by `blob5` for downloads per platform.
 
 ## Deploy

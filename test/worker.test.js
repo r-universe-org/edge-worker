@@ -73,26 +73,61 @@ test('passes everything when the allowlist can not be loaded', async () => {
   assert.equal(res.headers.get('X-R-Universe-Edge'), 'unchecked');
 });
 
-test('keeps the allowlist for 5 minutes, but retries a failure after 1 minute', async (t) => {
+test('reloads the allowlist after 5 minutes in the background, using the old one meanwhile', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const pending = [];
+  const ctx = { waitUntil: (promise) => pending.push(promise) };
+  const visit = (path) => worker.fetch(new Request(`https://test${universe}.r-universe.dev${path}`), env, ctx);
+  const loads = () => calls.filter(x => x === '/api/allowlist').length;
+  await visit('/');
+  t.mock.timers.tick(299 * 1000);
+  await visit('/');
+  assert.equal(loads(), 1);
+
+  // Expired: the request does not wait for the reload, which never finishes here
+  t.mock.timers.tick(2 * 1000);
+  list = () => new Promise(() => {});
+  assert.equal((await visit('/dplyr')).status, 200);
+  assert.equal((await visit('/ggplot2')).status, 404);
+  assert.equal(loads(), 2); // reloading once at a time
+  assert.equal(pending.length, 1);
+  pending.length = 0; // do not wait for it below
+
+  // A failed reload keeps the old list, and tries again after a minute
+  t.mock.timers.tick(61 * 1000);
+  list = () => new Response('Bad gateway', { status: 502 });
+  assert.equal((await visit('/ggplot2')).status, 404);
+  await Promise.all(pending);
+  assert.equal((await visit('/ggplot2')).status, 404);
+  assert.equal(loads(), 3);
+
+  // A successful reload is used once it is loaded
+  t.mock.timers.tick(61 * 1000);
+  list = { packages: ['ggplot2'], universe: [''] };
+  assert.equal((await visit('/ggplot2')).status, 404);
+  await Promise.all(pending);
+  assert.equal((await visit('/ggplot2')).status, 200);
+  assert.equal(loads(), 4);
+
+  // After an hour the old list is too old: wait for the new one
+  t.mock.timers.tick(3601 * 1000);
+  list = { packages: ['tidyr'], universe: [''] };
+  assert.equal((await visit('/tidyr')).status, 200);
+  assert.equal(loads(), 5);
+});
+
+test('retries an allowlist that could not be loaded after 1 minute, without using it when stale', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
   const loads = () => calls.filter(x => x === '/api/allowlist').length;
-  await get('/');
-  t.mock.timers.tick(299 * 1000);
+  list = () => new Response('Bad gateway', { status: 502 });
+  assert.equal((await get('/ggplot2')).headers.get('X-R-Universe-Edge'), 'unchecked');
+  t.mock.timers.tick(59 * 1000);
   await get('/');
   assert.equal(loads(), 1);
   t.mock.timers.tick(2 * 1000);
-  await get('/');
+  list = { packages: ['dplyr'], universe: [''] };
+  assert.equal((await get('/ggplot2')).status, 404); // waited for the new list
   assert.equal(loads(), 2);
-
-  list = () => new Response('Bad gateway', { status: 502 });
-  t.mock.timers.tick(301 * 1000);
-  await get('/'); // fails
-  t.mock.timers.tick(59 * 1000);
-  await get('/');
-  assert.equal(loads(), 3);
-  t.mock.timers.tick(2 * 1000);
-  await get('/');
-  assert.equal(loads(), 4);
 });
 
 test('blocks the crawler fleet from hosting networks only', async () => {
@@ -122,6 +157,7 @@ test('passes other hosts and methods without loading the allowlist', async () =>
 test('counts hits of packages, downloads, and universe pages', async () => {
   await get('/dplyr');
   await get('/DPLYR/doc/manual.html');
+  await get('/dplyr/badges/version');
   await get('/src/contrib/dplyr_1.1.4.tar.gz');
   await get('/bin/windows/contrib/4.5/data.table_1.16.0.zip');
   await get('/bin/macosx/big-sur-arm64/contrib/4.5/RAppArmor_3.2.tgz');
@@ -129,23 +165,28 @@ test('counts hits of packages, downloads, and universe pages', async () => {
   await get('/src/contrib/missing_1.0.tar.gz');
   await get('/src/contrib/PACKAGES.gz');
   await get('/builds');
+  await get('/builds/');
+  await get('/api/packages');
   await get('/');
   await get('/dplyr', 'HEAD'); // only GET
   await get('/wp-admin'); // rejected
   const name = `test${universe}`;
   assert.deepEqual(points.map(x => x.blobs), [
-    [name, 'package', 'dplyr', '', ''],
-    [name, 'package', 'dplyr', '', ''],
+    [name, 'package', 'dplyr', '', '/'],
+    [name, 'package', 'dplyr', '', '/doc'],
+    [name, 'package', 'dplyr', '', '/badges'],
     [name, 'download', 'dplyr', '1.1.4', 'src'],
     [name, 'download', 'data.table', '1.16.0', 'windows'],
     [name, 'download', 'rapparmor', '3.2', 'macosx'],
     [name, 'download', 'tidyr', '1.3.1', 'linux'],
     [name, 'download', 'missing', '1.0', 'src'],
-    [name, 'universe', '', '', '/src'],
+    [name, 'universe', '', '', '/src/*'],
     [name, 'universe', '', '', '/builds'],
+    [name, 'universe', '', '', '/builds'],
+    [name, 'universe', '', '', '/api/*'],
     [name, 'universe', '', '', '/']
   ]);
-  assert.deepEqual(points.map(x => x.doubles[0]), [200, 200, 302, 302, 302, 302, 404, 200, 200, 200]);
+  assert.deepEqual(points.map(x => x.doubles[0]), [200, 200, 200, 302, 302, 302, 302, 404, 200, 200, 200, 200, 200]);
   assert.ok(points.every(x => x.indexes[0] === name));
 });
 

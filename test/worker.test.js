@@ -151,6 +151,15 @@ test('blocks the crawler fleet from hosting networks only', async () => {
   assert.equal((await visit(undefined)).status, 200);
 });
 
+test('does not wait for an allowlist that another request is loading', async () => {
+  list = () => new Promise(() => {}); // e.g. the first client disconnected, so it never loads
+  get('/dplyr'); // not awaited
+  list = { packages: ['dplyr'], universe: [''] };
+  const res = await get('/dplyr'); // would hang if it waited for the first load
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
+});
+
 test('passes other hosts and methods without loading the allowlist', async () => {
   await get('/wp-admin', 'GET', 'r-universe.dev');
   await get('/wp-admin', 'POST');

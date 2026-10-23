@@ -32,9 +32,11 @@ const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes
 const RETRY_TTL = 60; // seconds before loading it again after a failure
 const STALE_TTL = 3600; // seconds to keep answering with an expired allowlist while it reloads
 
-// universe -> {expires, stale, promise}. The promise resolves to {packages, universe}: Sets of
-// lowercase names, null if the universe does not exist, or undefined if it could not be loaded.
+// universe -> {expires, stale, list}. The list is {packages, universe}: Sets of lowercase
+// names, null if the universe does not exist, or undefined if it could not be loaded.
 // Until `stale`, an expired allowlist is still used while a new one loads in the background.
+// Only loaded lists are kept, not promises of lists that are loading: a request can not wait for
+// the I/O of another request (the runtime cancels it as hung, e.g. if that client disconnects).
 const lists = new Map();
 
 export default {
@@ -123,10 +125,10 @@ function describeDownload(path) {
   return ['download', pkg.toLowerCase(), version, platform];
 }
 
-function getAllowlist(universe, origin, ctx) {
+async function getAllowlist(universe, origin, ctx) {
   const cached = lists.get(universe);
   if (cached && Date.now() < cached.expires) {
-    return cached.promise;
+    return cached.list;
   }
   if (cached && Date.now() < cached.stale) {
     // Stale-while-revalidate: reload in the background, and use the new list once it is loaded.
@@ -134,21 +136,22 @@ function getAllowlist(universe, origin, ctx) {
     cached.expires = Date.now() + RETRY_TTL * 1000;
     const reload = loadAllowlist(origin).then(list => lists.set(universe, newEntry(list)), () => {});
     ctx?.waitUntil(reload);
-    return cached.promise;
+    return cached.list;
   }
-  const entry = newEntry(loadAllowlist(origin));
-  entry.promise = entry.promise.catch(() => {
-    entry.expires = Math.min(entry.expires, Date.now() + RETRY_TTL * 1000);
-    entry.stale = 0;
+  // Concurrent requests may each load it: cheap, because it is also cached at the edge
+  try {
+    const list = await loadAllowlist(origin);
+    lists.set(universe, newEntry(list));
+    return list;
+  } catch {
+    lists.set(universe, { expires: Date.now() + RETRY_TTL * 1000, stale: 0, list: undefined });
     return undefined;
-  });
-  lists.set(universe, entry);
-  return entry.promise;
+  }
 }
 
 function newEntry(list) {
   const now = Date.now();
-  return { expires: now + LIST_TTL * 1000, stale: now + STALE_TTL * 1000, promise: Promise.resolve(list) };
+  return { expires: now + LIST_TTL * 1000, stale: now + STALE_TTL * 1000, list };
 }
 
 async function loadAllowlist(origin) {

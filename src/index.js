@@ -1,6 +1,7 @@
-// Cloudflare worker in front of {universe}.r-universe.dev, see README.md. It does two things:
+// Cloudflare worker in front of {universe}.r-universe.dev and r-universe.dev, see README.md. It does two things:
 //  1. Reject requests for top-level pages that do not exist (e.g. from security scanners),
 //     using the allowlist of the universe from /api/allowlist: its packages and universe pages.
+//     On r-universe.dev this is the only thing it does, with the top-level pages of the site.
 //  2. Count hits per universe and package, in Workers Analytics Engine. The stats are public
 //     on /cf/downloads and /cf/pageviews, see stats.js.
 // Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, and a
@@ -10,6 +11,7 @@
 import { stats } from './stats.js';
 
 const UNIVERSE_HOST = /^([a-z0-9-]+)\.r-universe\.dev$/i;
+const GLOBAL_HOST = 'r-universe.dev';
 
 // Package files: /src/contrib/{package}_{version}.tar.gz or /bin/{platform}/.../{package}_{version}.{zip,tgz,tar.gz}
 const DOWNLOAD = /^\/(?:src|bin\/([^/]+))\/.*\/([A-Za-z0-9.]+)_([^_/]+)\.(?:tar\.gz|tgz|zip)$/;
@@ -47,6 +49,9 @@ export default {
       }), 'blocked');
     }
     const url = new URL(request.url);
+    if (url.hostname.toLowerCase() === GLOBAL_HOST && (request.method === 'GET' || request.method === 'HEAD')) {
+      return checkGlobal(request, url, ctx);
+    }
     const universe = url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
     if (!universe || (request.method !== 'GET' && request.method !== 'HEAD')) {
       return fetch(request);
@@ -84,6 +89,17 @@ export default {
     return mark(response, allowed ? 'pass' : 'unchecked');
   }
 };
+
+// r-universe.dev: reject pages that do not exist, using its /api/allowlist (/_global/api/allowlist
+// in the frontend). The key '_global' can not be a universe name. Hits are not counted.
+async function checkGlobal(request, url, ctx) {
+  const allowed = await getAllowlist('_global', url.origin, ctx);
+  const page = url.pathname.split('/')[1].toLowerCase();
+  if (allowed && !allowed.universe.has(page)) {
+    return mark(notFound(`Page not found: /${page}`), 'rejected');
+  }
+  return mark(await fetch(request), allowed ? 'pass' : 'unchecked');
+}
 
 function isCrawler(request) {
   return request.headers.get('User-Agent') === CRAWLER_AGENT && HOSTING_ASNS.has(request.cf?.asn);

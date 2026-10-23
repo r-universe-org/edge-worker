@@ -161,9 +161,26 @@ test('does not wait for an allowlist that another request is loading', async () 
 });
 
 test('passes other hosts and methods without loading the allowlist', async () => {
-  await get('/wp-admin', 'GET', 'r-universe.dev');
+  await get('/wp-admin', 'GET', 'docs.ropensci.org');
   await get('/wp-admin', 'POST');
-  assert.deepEqual(calls, ['/wp-admin', '/wp-admin']);
+  await get('/webhook', 'POST', 'r-universe.dev');
+  assert.deepEqual(calls, ['/wp-admin', '/wp-admin', '/webhook']);
+});
+
+test('rejects pages that do not exist on r-universe.dev, without counting hits', async () => {
+  list = { packages: [], universe: ['', 'search', 'api', 'cranstatus'] };
+  for (const path of ['/', '/search', '/Search?q=x', '/api/search', '/cranstatus/sf']) {
+    const res = await get(path, 'GET', 'r-universe.dev');
+    assert.equal(res.status, 200, path);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
+  }
+  for (const path of ['/wp-admin.php', '/.env', '/dplyr', '/cf/downloads']) {
+    const res = await get(path, 'GET', 'r-universe.dev');
+    assert.equal(res.status, 404, path);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'rejected');
+  }
+  assert.equal(calls.filter(x => x === '/api/allowlist').length, 1);
+  assert.equal(points.length, 0);
 });
 
 test('counts hits of packages, downloads, and universe pages', async () => {

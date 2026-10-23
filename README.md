@@ -1,6 +1,6 @@
 # r-universe-edge
 
-Cloudflare worker in front of `{universe}.r-universe.dev`. All code is in `src/index.js`.
+Cloudflare worker in front of `{universe}.r-universe.dev` and `r-universe.dev`. All code is in `src/index.js`.
 It does the following, and passes everything else to the backend unchanged:
 
  - **Reject pages that do not exist**, without the backend. The first path segment must be
@@ -8,7 +8,10 @@ It does the following, and passes everything else to the backend unchanged:
    `/src`, `/bin`, `/builds`, `/card.png`, ...). The allowlist is lowercase, and matching is
    case insensitive (the frontend redirects other cases of package names). Everything on a
    universe that does not exist gets a 404. This removes the noise from security scanners
-   and scripts that try random paths.
+   and scripts that try random paths. On `r-universe.dev` itself, the first path segment must
+   be one of the top-level pages of the site (`/search`, `/api`, `/cranstatus`, ...) from
+   https://r-universe.dev/api/allowlist (`global_pages` in the frontend); this is all the
+   worker does there (no hits are counted).
  - **Count hits** per universe and package, see below.
  - **Block a crawler fleet**: a fleet that downloads every dataset in every format and
    overloaded the data export server (October 2026). It uses the user agent of a real
@@ -30,8 +33,9 @@ is per worker instance, `/api/allowlist` is also cached at the edge (in each Clo
 center, for all instances), as set by the `Cache-Control` header of the frontend: 5 minutes,
 with stale-while-revalidate. A new package or universe can therefore take up to 10 minutes to become
 reachable. If the allowlist can not be loaded, all requests are passed through and not
-counted, and it is loaded again after a minute. Other hosts (`r-universe.dev`, vhosts
-like `*.ropensci.org`) and methods other than GET/HEAD are always passed through.
+counted, and it is loaded again after a minute. Other hosts (vhosts
+like `*.ropensci.org`) and methods other than GET/HEAD (e.g. `POST /webhook` on
+`r-universe.dev`) are always passed through.
 
 To see what the worker did, responses for GET/HEAD requests on a universe have a header
 `X-R-Universe-Edge` (also `blocked` for the crawler fleet, on any request): `redirect` (download by hash), `rejected` (404 from the worker), `pass`
@@ -111,8 +115,8 @@ npx wrangler deploy
 
 The worker must run on a *route* (see `wrangler.toml`), not a custom domain: requests
 from the worker to its own zone (for `/api/allowlist` and the pages) then go to the origin,
-instead of to the worker again. Workers are billed per request: all universe traffic goes
-through the worker.
+instead of to the worker again. Workers are billed per request: all traffic on universes and
+on `r-universe.dev` goes through the worker.
 
 ## Test
 

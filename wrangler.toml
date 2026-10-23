@@ -3,10 +3,11 @@ main = "src/index.js"
 compatibility_date = "2026-08-01"
 account_id = "3fcdf4a2e34a7a2e74fc8686b68acea1" # rOpenSci Main, owner of the active r-universe.dev zone
 
-# Run on all universe subdomains. A route (not a custom domain) is required: requests
+# Run on all universe subdomains, and on r-universe.dev itself. A route (not a custom domain) is required: requests
 # from the worker to the same zone (also /api/allowlist) then go to the origin instead of the worker again.
 routes = [
-  { pattern = "*.r-universe.dev/*", zone_name = "r-universe.dev" }
+  { pattern = "*.r-universe.dev/*", zone_name = "r-universe.dev" },
+  { pattern = "r-universe.dev/*", zone_name = "r-universe.dev" }
 ]
 
 # Hits per universe and package, see README.md. The dataset is created on the first write.

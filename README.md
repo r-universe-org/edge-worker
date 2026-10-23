@@ -1,41 +1,22 @@
 # r-universe-edge
 
-Cloudflare worker in front of `{universe}.r-universe.dev` and `r-universe.dev`. All code is in `src/index.js`.
-It does the following, and passes everything else to the backend unchanged:
+This is an *optional* worker that runs on the `r-universe.dev` domains to reduce stress on our server and collect some stats. Enabling it will:
 
- - **Reject pages that do not exist**, without the backend. The first path segment must be
-   in the allowlist of the universe: one of its packages, or a universe page (`/`, `/api`,
-   `/src`, `/bin`, `/builds`, `/card.png`, ...). The allowlist is lowercase, and matching is
-   case insensitive (the frontend redirects other cases of package names). Everything on a
-   universe that does not exist gets a 404. This removes the noise from security scanners
-   and scripts that try random paths. On `r-universe.dev` itself, the first path segment must
-   be one of the top-level pages of the site (`/search`, `/api`, `/cranstatus`, ...) from
-   https://r-universe.dev/api/allowlist (`global_pages` in the frontend); this is all the
-   worker does there (no hits are counted).
- - **Count hits** per universe and package, see below.
- - **Block a crawler fleet**: a fleet that downloads every dataset in every format and
-   overloaded the data export server (October 2026). It uses the user agent of a real
-   browser (Firefox 148 on Windows), so it gets a 403 only from hosting networks: the ASNs in
-   `HOSTING_ASNS` in `src/index.js` (from `request.cf.asn`), not from home and mobile ISPs.
- - **Redirect downloads by hash**: requests with a `?sha256={hash}` parameter (64 hex
-   characters) get a 301 to `https://r2.ropensci.org/{hash}`, without the allowlist or the
-   backend. This relieves the backend of the many concurrent package downloads (it replaces
-   the redirect rule in Cloudflare that did this before the worker). Other values of the
-   parameter go to the backend as usual.
+ - **Reject pages and universes that do not exist** to block noise from security scanners
+ - **Redirect sha256 requests directly to R2** without revalidation to speed up package downloads
+ - **Count download hits** per universe and package, see below.
+ - **Expose stats endpoits** stats `/cf/downloads` and `/cf/pageviews`
 
-The allowlist comes from `/api/allowlist` of the universe (for example
-https://jeroen.r-universe.dev/api/allowlist), with separate lists of `packages` and
-`universe` pages. It changes rarely (only when packages are added or removed), so it is
-kept in memory for 5 minutes. After that it is reloaded in the background
-(stale-while-revalidate): requests keep using the old allowlist until the new one is loaded,
-so they do not wait for it, unless the old one is more than an hour old. Because that memory
-is per worker instance, `/api/allowlist` is also cached at the edge (in each Cloudflare data
-center, for all instances), as set by the `Cache-Control` header of the frontend: 5 minutes,
-with stale-while-revalidate. A new package or universe can therefore take up to 10 minutes to become
-reachable. If the allowlist can not be loaded, all requests are passed through and not
-counted, and it is loaded again after a minute. Other hosts (vhosts
-like `*.ropensci.org`) and methods other than GET/HEAD (e.g. `POST /webhook` on
-`r-universe.dev`) are always passed through.
+The worker can be enabled and disabled for certain routes in cloudflare. Everything in R-universe should still work when the router is disabled.
+
+## Allow lists
+
+The backend server exposes allow lists about valid top level directories, e.g.
+
+ - https://r-universe.dev/api/allowlist
+ - https://jeroen.r-universe.dev/api/allowlist
+
+The idea is that these are highly cachable and can be used to prefilter requests in the edge.
 
 To see what the worker did, responses for GET/HEAD requests on a universe have a header
 `X-R-Universe-Edge` (also `blocked` for the crawler fleet, on any request): `redirect` (download by hash), `rejected` (404 from the worker), `pass`

@@ -19,7 +19,7 @@ The backend server exposes allow lists about valid top level directories, e.g.
 The idea is that these are highly cachable and can be used to prefilter requests in the edge.
 
 To see what the worker did, responses for GET/HEAD requests on a universe have a header
-`X-R-Universe-Edge` (also `blocked` for the crawler fleet, on any request): `redirect` (download by hash), `rejected` (404 from the worker), `pass`
+`X-R-Universe-Edge` (also `blocked` for blocked crawlers and bots, on any request): `redirect` (download by hash), `rejected` (404 from the worker), `pass`
 (allowed, from the backend), or `unchecked` (from the backend, the allowlist could not be
 loaded). Responses without the header did not go through the worker.
 

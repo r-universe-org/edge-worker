@@ -133,6 +133,17 @@ test('retries an allowlist that could not be loaded after 1 minute, without usin
   assert.equal(loads(), 2);
 });
 
+test('blocks bots that ignore robots.txt everywhere', async () => {
+  for (const host of [`test${universe}.r-universe.dev`, 'r-universe.dev']) {
+    const request = new Request(`https://${host}/dplyr/data/x/csv`, { headers: { 'User-Agent': 'rednote-websearch-bot' } });
+    const res = await worker.fetch(request, env);
+    assert.equal(res.status, 403);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'blocked');
+  }
+  assert.deepEqual(calls, []);
+  assert.equal(points.length, 0);
+});
+
 test('blocks the crawler fleet from hosting networks only', async () => {
   const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0';
   const visit = (asn, ua = agent, host = `test${universe}.r-universe.dev`) => {

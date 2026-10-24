@@ -30,6 +30,10 @@ const HOSTING_ASNS = new Set([
   205548, 206804, 206996, 208172, 212238, 213881, 214677, 214996, 393577
 ]);
 
+// Bots that ignore robots.txt (which disallows the data exports) and overload the data export
+// server, blocked everywhere: rednote-websearch-bot (October 2026, from Alibaba Cloud).
+const BLOCKED_BOTS = /rednote-websearch-bot/i;
+
 const LIST_TTL = 300; // seconds to keep the allowlist of a universe (it changes rarely)
 const RETRY_TTL = 60; // seconds before loading it again after a failure
 const STALE_TTL = 3600; // seconds to keep answering with an expired allowlist while it reloads
@@ -102,7 +106,8 @@ async function checkGlobal(request, url, ctx) {
 }
 
 function isCrawler(request) {
-  return request.headers.get('User-Agent') === CRAWLER_AGENT && HOSTING_ASNS.has(request.cf?.asn);
+  const agent = request.headers.get('User-Agent') || '';
+  return BLOCKED_BOTS.test(agent) || (agent === CRAWLER_AGENT && HOSTING_ASNS.has(request.cf?.asn));
 }
 
 // Copy the response, because the headers of fetched and redirect responses are immutable

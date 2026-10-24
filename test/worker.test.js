@@ -178,20 +178,28 @@ test('passes other hosts and methods without loading the allowlist', async () =>
   assert.deepEqual(calls, ['/wp-admin', '/wp-admin', '/webhook']);
 });
 
-test('rejects pages that do not exist on r-universe.dev, without counting hits', async () => {
+test('rejects pages that do not exist on r-universe.dev, and counts hits of the others', async () => {
   list = { packages: [], universe: ['', 'search', 'api', 'cranstatus'] };
   for (const path of ['/', '/search', '/Search?q=x', '/api/search', '/cranstatus/sf']) {
     const res = await get(path, 'GET', 'r-universe.dev');
     assert.equal(res.status, 200, path);
     assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
   }
-  for (const path of ['/wp-admin.php', '/.env', '/dplyr', '/cf/downloads']) {
+  await get('/search', 'HEAD', 'r-universe.dev'); // only GET
+  for (const path of ['/wp-admin.php', '/.env', '/dplyr']) {
     const res = await get(path, 'GET', 'r-universe.dev');
     assert.equal(res.status, 404, path);
     assert.equal(res.headers.get('X-R-Universe-Edge'), 'rejected');
   }
   assert.equal(calls.filter(x => x === '/api/allowlist').length, 1);
-  assert.equal(points.length, 0);
+  assert.deepEqual(points.map(x => x.blobs.slice(1)), [
+    ['universe', '', '', '/'],
+    ['universe', '', '', '/search'],
+    ['universe', '', '', '/search'],
+    ['universe', '', '', '/api/*'],
+    ['universe', '', '', '/cranstatus/*']
+  ]);
+  assert.ok(points.every(x => x.indexes[0] === '_global' && x.blobs[0] === '_global'));
 });
 
 test('counts hits of packages, downloads, and universe pages', async () => {
@@ -345,4 +353,45 @@ test('a package named cf is not shadowed by the stats', async () => {
   const res = await getStats('/cf/downloads');
   assert.equal(res.headers.get('X-R-Universe-Edge'), 'pass');
   assert.deepEqual(sqlQueries, []);
+});
+
+test('serves downloads of all universes on r-universe.dev', async () => {
+  sqlRows = () => {
+    const sql = sqlQueries.at(-1).sql;
+    const data = sql.includes('GROUP BY platform') ? [{ platform: 'src', count: '3' }, { platform: 'linux', count: '10' }]
+      : sql.includes('DISTINCT') ? [{ count: '2' }]
+      : sql.includes('GROUP BY universe, package') ? [{ universe: 'cran', package: 'dplyr', count: '8' }, { universe: 'jeroen', package: 'v8', count: '5' }]
+      : [{ universe: 'cran', count: '8' }, { universe: 'jeroen', count: '5' }];
+    return Response.json({ data });
+  };
+  const res = await getStats('/cf/downloads?days=7&top=2', 'r-universe.dev');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('X-R-Universe-Edge'), 'stats');
+  assert.deepEqual(await res.json(), {
+    days: 7, top: 2, downloads: 13, universes: 2, platforms: { linux: 10, src: 3 },
+    top_universes: [{ universe: 'cran', downloads: 8 }, { universe: 'jeroen', downloads: 5 }],
+    top_packages: [{ universe: 'cran', package: 'dplyr', downloads: 8 }, { universe: 'jeroen', package: 'v8', downloads: 5 }]
+  });
+  assert.equal(sqlQueries.length, 4);
+  assert.ok(sqlQueries.every(q => !q.sql.includes('index1') && /INTERVAL '7' DAY/.test(q.sql)));
+  assert.equal(sqlQueries.filter(q => q.sql.includes('LIMIT 2 ')).length, 2);
+
+  // Cached per days and top
+  await getStats('/cf/downloads?top=2&days=7', 'r-universe.dev');
+  assert.equal(sqlQueries.length, 4);
+  await getStats('/cf/downloads?days=7&top=5000', 'r-universe.dev');
+  assert.equal(sqlQueries.filter(q => q.sql.includes('LIMIT 1000 ')).length, 2);
+  assert.equal(points.length, 0); // not counted
+});
+
+test('serves views of the pages of r-universe.dev', async () => {
+  sqlRows = [
+    { page: '/', count: '20' },
+    { page: '/search', count: '5' },
+    { page: '/api/*', count: '1000' } // not a page
+  ];
+  const res = await getStats('/cf/pageviews?top=3', 'r-universe.dev');
+  assert.deepEqual(await res.json(), { days: 30, pageviews: 25, pages: { '/': 20, '/search': 5 } });
+  assert.match(sqlQueries[0].sql, /index1 = '_global' AND blob2 = 'universe'/);
+  assert.equal((await getStats('/cf/other', 'r-universe.dev')).status, 404);
 });

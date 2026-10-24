@@ -1,28 +1,44 @@
 // Public stats of a universe from the hits in Analytics Engine, see README.md:
 //   /cf/downloads?days=30  downloads per package and platform
 //   /cf/pageviews?days=30  views of the universe pages and the package landing pages
+// And on r-universe.dev (the universe GLOBAL):
+//   /cf/downloads?days=30&top=100  downloads of all universes: totals, and the top universes and packages
+//   /cf/pageviews?days=30  views of the pages of r-universe.dev
 // Analytics Engine can only be read with the SQL API, which requires an API token (the secret
 // ANALYTICS_TOKEN). Results are cached at the edge, so the SQL API is queried at most once
 // per universe, type and number of days per hour (per data center).
 
 const CACHE_TTL = 3600;
 const MAX_DAYS = 90; // Analytics Engine keeps data for three months
+const MAX_TOP = 1000;
+
+// The hits of r-universe.dev are counted as this universe, which can not be a universe name
+export const GLOBAL = '_global';
 
 // Universe pages that are html pages for visitors, rather than files or data
 const HTML_PAGES = ['/', '/builds', '/packages', '/badges', '/api', '/datasets', '/contributors', '/articles'];
 
+// Pages of r-universe.dev that are html pages
+const GLOBAL_HTML_PAGES = ['/', '/search', '/activity', '/builds', '/organizations', '/repositories', '/packages',
+  '/articles', '/datasets', '/sysdeps', '/galaxy', '/welcome'];
+
 const STATS = { downloads, pageviews };
+const GLOBAL_STATS = { downloads: globalDownloads, pageviews: globalPageviews };
 
 export async function stats(request, env, ctx, universe) {
   const url = new URL(request.url);
   const type = url.pathname.match(/^\/cf\/([a-z]+)\/?$/i)?.[1].toLowerCase();
-  if (!Object.hasOwn(STATS, type)) {
+  const global = universe === GLOBAL;
+  const types = global ? GLOBAL_STATS : STATS;
+  if (!Object.hasOwn(types, type)) {
     return error(404, `Stats not found: ${url.pathname} (use /cf/downloads or /cf/pageviews)`);
   }
   const days = Math.min(Math.max(parseInt(url.searchParams.get('days')) || 30, 1), MAX_DAYS);
+  const top = Math.min(Math.max(parseInt(url.searchParams.get('top')) || 100, 1), MAX_TOP);
+  const options = global && type === 'downloads' ? { days, top } : { days };
 
   // One cache entry for all spellings of the same request
-  const key = new Request(`${url.origin}/cf/${type}?days=${days}`);
+  const key = new Request(`${url.origin}/cf/${type}?${new URLSearchParams(options)}`);
   const cached = await caches.default.match(key);
   if (cached) {
     return cached;
@@ -32,7 +48,8 @@ export async function stats(request, env, ctx, universe) {
   }
   let body;
   try {
-    body = { universe, days, ...(await STATS[type](env, universe, days)) };
+    const result = await types[type](env, universe, days, top);
+    body = global ? { ...options, ...result } : { universe, ...options, ...result };
   } catch (e) {
     return error(502, `Failed to query stats: ${e.message}`);
   }
@@ -79,8 +96,41 @@ async function pageviews(env, universe, days) {
   return { pageviews: sum(Object.values(pages)) + sum(packages.map(x => x.pageviews)), pages, packages };
 }
 
+// Downloads of all universes: {downloads, universes, platforms: {platform: downloads},
+// top_universes: [{universe, downloads}], top_packages: [{universe, package, downloads}]}
+async function globalDownloads(env, universe, days, top) {
+  const where = `blob2 = 'download' AND double1 < 400 AND timestamp > NOW() - INTERVAL '${days}' DAY`;
+  const [platforms, count, universes, packages] = await Promise.all([
+    query(env, `SELECT blob5 AS platform, SUM(_sample_interval) AS count
+      FROM r_universe_hits WHERE ${where} GROUP BY platform FORMAT JSON`),
+    query(env, `SELECT COUNT(DISTINCT blob1) AS count FROM r_universe_hits WHERE ${where} FORMAT JSON`),
+    query(env, `SELECT blob1 AS universe, SUM(_sample_interval) AS count
+      FROM r_universe_hits WHERE ${where} GROUP BY universe ORDER BY count DESC LIMIT ${top} FORMAT JSON`),
+    query(env, `SELECT blob1 AS universe, blob3 AS package, SUM(_sample_interval) AS count
+      FROM r_universe_hits WHERE ${where} GROUP BY universe, package ORDER BY count DESC LIMIT ${top} FORMAT JSON`)
+  ]);
+  platforms.sort((a, b) => b.count - a.count);
+  return {
+    downloads: sum(platforms.map(x => x.count)),
+    universes: count[0]?.count ?? 0,
+    platforms: Object.fromEntries(platforms.map(x => [x.platform, x.count])),
+    top_universes: universes.map(x => ({ universe: x.universe, downloads: x.count })),
+    top_packages: packages.map(x => ({ universe: x.universe, package: x.package, downloads: x.count }))
+  };
+}
+
+// Views of the pages of r-universe.dev: {pageviews, pages: {page: views}}
+async function globalPageviews(env, universe, days) {
+  const rows = await query(env, `SELECT blob5 AS page, SUM(_sample_interval) AS count
+    FROM r_universe_hits WHERE index1 = '${GLOBAL}' AND blob2 = 'universe'
+    AND (double1 = 200 OR double1 = 304) AND timestamp > NOW() - INTERVAL '${days}' DAY
+    GROUP BY page FORMAT JSON`);
+  const pages = Object.fromEntries(rows.filter(x => GLOBAL_HTML_PAGES.includes(x.page)).map(x => [x.page, x.count]));
+  return { pageviews: sum(Object.values(pages)), pages };
+}
+
 // The SQL API has no query parameters: the universe comes from the hostname (a-z, 0-9 and -)
-// and days is an integer, so they are safe to use in the query.
+// and days and top are integers, so they are safe to use in the query.
 async function query(env, sql) {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.ANALYTICS_ACCOUNT}/analytics_engine/sql`, {
     method: 'POST',

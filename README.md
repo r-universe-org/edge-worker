@@ -4,7 +4,7 @@ This is an *optional* worker that runs on the `r-universe.dev` domains to reduce
 
  - **Reject pages and universes that do not exist** to block noise from security scanners
  - **Redirect sha256 requests directly to R2** without revalidation to speed up package downloads
- - **Count download hits** per universe and package, see below.
+ - **Count download hits** per universe and package, and page hits on `r-universe.dev`, see below.
  - **Expose stats endpoits** stats `/cf/downloads` and `/cf/pageviews`
 
 The worker can be enabled and disabled for certain routes in cloudflare. Everything in R-universe should still work when the router is disabled.
@@ -52,6 +52,9 @@ The types are:
    `/api/*` for the API and `/src/*` for the repository indexes such as
    `/src/contrib/PACKAGES.gz`.
 
+Hits on `r-universe.dev` itself are recorded as the universe `_global`, always with type
+`universe` (e.g. `/search`, or `/api/*`).
+
 Data is kept for three months. At high volume Analytics Engine samples data points, so
 count with `SUM(_sample_interval)` rather than `COUNT()`. Query with the
 [SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/), using an
@@ -79,7 +82,15 @@ query the SQL API, so that the frontend and other clients need no token:
    `/packages`, `/badges`, `/api`, `/datasets`, `/contributors`, `/articles`) and of the
    landing pages of the packages, with status 200 or 304.
 
-For example https://jeroen.r-universe.dev/cf/downloads. `days` is 1 to 90 (default 30).
+On `r-universe.dev` the same endpoints show stats of the whole site:
+
+ - `/cf/downloads?days=30&top=100`: downloads of all universes: the total, the number of
+   universes with downloads, downloads per platform, and the `top` (1 to 1000) universes
+   (`top_universes`) and packages (`top_packages`, with their universe).
+ - `/cf/pageviews?days=30`: views of the html pages of `r-universe.dev` (`/`, `/search`,
+   `/packages`, `/organizations`, etc), with status 200 or 304.
+
+For example https://jeroen.r-universe.dev/cf/downloads or https://r-universe.dev/cf/downloads?top=10. `days` is 1 to 90 (default 30).
 Package names are lowercase. Responses are cached at the edge for an hour (per data center),
 also in browsers, and allow CORS. Errors are not cached. If a universe has a package named
 `cf`, its page is served instead.

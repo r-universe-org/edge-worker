@@ -258,6 +258,21 @@ test('redirects downloads by hash to the file storage, without the backend', asy
   assert.deepEqual(points.map(x => x.doubles[0]), [301]);
 });
 
+test('redirects CRAN urls of manuals of existing packages', async () => {
+  for (const path of ['/dplyr/dplyr.pdf', '/RAppArmor/RAppArmor.pdf?x=1', '/rapparmor/RAPPARMOR.pdf']) {
+    const res = await get(path);
+    const pkg = path.split('/')[1];
+    assert.equal(res.status, 301, path);
+    assert.equal(res.headers.get('Location'), `https://test${universe}.r-universe.dev/${pkg}/doc/manual.pdf`);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'redirect');
+  }
+  assert.equal((await get('/dplyr/tidyr.pdf')).status, 200); // other pdfs go to the backend
+  assert.equal((await get('/dplyr/doc/dplyr.pdf')).status, 200);
+  assert.equal((await get('/ggplot2/ggplot2.pdf')).status, 404); // not a package
+  assert.deepEqual(calls, ['/api/allowlist', '/dplyr/tidyr.pdf', '/dplyr/doc/dplyr.pdf']);
+  assert.equal(points.length, 2);
+});
+
 test('passes invalid hashes to the backend', async () => {
   for (const hash of ['abc', 'X'.repeat(64), '806953e2f92f4109c6a0311430b922fb845888be513922ded23c323757a9c4fb0']) {
     assert.equal((await get(`/src/contrib/dplyr_1.1.4.tar.gz?sha256=${hash}`)).status, 302);

@@ -4,7 +4,8 @@
 //     On r-universe.dev it uses the top-level pages of the site.
 //  2. Count hits per universe and package, in Workers Analytics Engine, and of r-universe.dev as
 //     the universe '_global'. The stats are public on /cf/downloads and /cf/pageviews, see stats.js.
-// Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, and a
+// Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, as are
+// CRAN urls of manuals to the manual on r-universe, and a
 // known crawler fleet is blocked. Everything else goes to the backend unchanged. Responses have
 // a header X-R-Universe-Edge: blocked, redirect, rejected, stats, pass (allowed), or unchecked (no allowlist).
 
@@ -19,6 +20,10 @@ const DOWNLOAD = /^\/(?:src|bin\/([^/]+))\/.*\/([A-Za-z0-9.]+)_([^_/]+)\.(?:tar\
 // Package files by their hash, e.g. /src/contrib/{package}_{version}.tar.gz?sha256={hash}
 const SHA256 = /^[0-9a-f]{64}$/;
 const STORAGE = 'https://r2.ropensci.org';
+
+// The manual by its CRAN url, /{package}/{package}.pdf, which search engines request a lot.
+// Its url on r-universe is /{package}/doc/manual.pdf.
+const CRAN_MANUAL = /^\/([^/]+)\/([^/]+)\.pdf$/;
 
 // A crawler fleet that downloads every dataset in every format, overloading the data export
 // server (October 2026). Its user agent is that of a real browser, so it is only blocked from
@@ -83,6 +88,10 @@ export default {
     }
     if (allowed && !allowed.universe.has(page) && !allowed.packages.has(page)) {
       return mark(notFound(`Page not found: /${page}`), 'rejected');
+    }
+    const manual = url.pathname.match(CRAN_MANUAL);
+    if (allowed?.packages.has(page) && manual?.[2].toLowerCase() === page) {
+      return mark(redirect(`${url.origin}/${manual[1]}/doc/manual.pdf`), 'redirect');
     }
 
     // 2. Count the hit
@@ -195,6 +204,11 @@ async function loadAllowlist(origin) {
   const data = await response.json();
   const lowercase = (names) => new Set(names.map(name => name.toLowerCase())); // already, to be safe
   return { packages: lowercase(data.packages), universe: lowercase(data.universe) };
+}
+
+// Permanent, so search engines update their links, and cached for a day
+function redirect(location) {
+  return new Response(null, { status: 301, headers: { Location: location, 'Cache-Control': 'public, max-age=86400' } });
 }
 
 function notFound(message) {

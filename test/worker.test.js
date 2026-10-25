@@ -455,7 +455,7 @@ test('records deployments of package files, with R version and architecture of b
     win: { R: '4.5.1', Platform: 'x86_64-w64-mingw32', Date: 'x', OStype: 'windows' },
     mac: 'R 4.4.2; aarch64-apple-darwin20; 2026-10-24 12:00:00 UTC; unix', // as a string
     linux: { R: '4.6.0', Platform: '', OStype: 'unix' }, // no compiled code
-    wasm: { R: '4.5.1', Platform: 'wasm32-unknown-emscripten' }
+    wasm: { R: '4.6.0', Platform: 'emscripten' }
   };
   for (const type of Object.keys(built)) {
     deployResponse = () => Response.json({ Package: 'dplyr', Built: built[type] });
@@ -472,7 +472,7 @@ test('records deployments of package files, with R version and architecture of b
     { ...row, pkgtype: 'win', rversion: '4.5.1', arch: 'x86_64' },
     { ...row, pkgtype: 'mac', rversion: '4.4.2', arch: 'aarch64' },
     { ...row, pkgtype: 'linux', rversion: '4.6.0', arch: 'all', distro: 'noble' },
-    { ...row, pkgtype: 'wasm', rversion: '4.5.1', arch: 'wasm32', checkstatus: null }
+    { ...row, pkgtype: 'wasm', rversion: '4.6.0', arch: 'emscripten', checkstatus: null }
   ]);
   assert.equal(calls.filter(x => x.startsWith('PUT ')).length, 5);
   assert.ok(!calls.includes('/api/allowlist'));

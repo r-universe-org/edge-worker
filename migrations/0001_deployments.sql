@@ -8,7 +8,7 @@ CREATE TABLE deployments (
   version     TEXT NOT NULL,
   pkgtype     TEXT NOT NULL,    -- src, win, mac, linux, wasm, or failure (a failed build)
   rversion    TEXT,             -- binaries: Built.R from the server's response, e.g. 4.5.1
-  arch        TEXT,             -- binaries: x86_64, aarch64, wasm32, or all (no compiled code)
+  arch        TEXT,             -- binaries: x86_64, aarch64, emscripten (wasm), or all (no compiled code)
   distro      TEXT,             -- Builder-Distro, e.g. noble for linux
   checkstatus TEXT,             -- Builder-Check (none for wasm and failures)
   sha256      TEXT,             -- the file (none for failures)

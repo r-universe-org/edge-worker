@@ -120,7 +120,7 @@ in the background. Every attempt is a row, so retries and failed deployments are
 | `package`, `version` | from the url |
 | `pkgtype`     | `src`, `win`, `mac`, `linux`, `wasm`, or `failure` |
 | `rversion`    | binaries: `Built.R` from the server's response, e.g. `4.5.1` (the deploy does not send it) |
-| `arch`        | binaries: from `Built.Platform`: `x86_64`, `aarch64`, `wasm32`, or `all` (no compiled code) |
+| `arch`        | binaries: from `Built.Platform`: `x86_64`, `aarch64`, `emscripten` (wasm), or `all` (no compiled code) |
 | `distro`      | `Builder-Distro`, e.g. `noble` for linux |
 | `checkstatus` | `Builder-Check`, none for wasm and failures |
 | `sha256`      | the file, none for failures |

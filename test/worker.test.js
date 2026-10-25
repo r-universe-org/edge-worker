@@ -5,8 +5,13 @@ import worker from '../src/index.js';
 // A fake backend: /api/allowlist returns the allowlist, other pages return 200 (downloads a 302)
 let list, calls, points;
 let sqlRows, sqlQueries;
+let deployResponse; // the response of the server to deployments
 globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : input);
+  if (deployResponse && url.pathname.startsWith('/api/packages/')) {
+    calls.push(`${input.method} ${url.pathname}`);
+    return deployResponse();
+  }
   if (url.hostname === 'api.cloudflare.com') { // fake SQL API of Analytics Engine
     sqlQueries.push({ url: url.href, auth: init.headers.Authorization, sql: init.body });
     return typeof sqlRows === 'function' ? sqlRows() : Response.json({ data: sqlRows });
@@ -28,6 +33,7 @@ beforeEach(() => {
   list = { packages: ['data.table', 'dplyr', 'rappArmor', 'tidyr'], universe: ['', 'api', 'bin', 'builds', 'card.png', 'src'] };
   calls = []; points = [];
   sqlRows = []; sqlQueries = [];
+  deployResponse = undefined; deployRows = [];
 });
 
 // A fake edge cache
@@ -37,7 +43,12 @@ globalThis.caches = { default: {
   put: async (key, response) => { cache.set(key.url, response); }
 } };
 
-const env = { HITS: { writeDataPoint: (point) => points.push(point) } }; // fake Analytics Engine
+// fake Analytics Engine and D1
+let deployRows;
+const env = {
+  HITS: { writeDataPoint: (point) => points.push(point) },
+  DEPLOYS: { prepare: (sql) => ({ bind: (...values) => ({ run: async () => deployRows.push({ sql, values }) }) }) }
+};
 function get(path, method = 'GET', host = `test${universe}.r-universe.dev`) {
   return worker.fetch(new Request(`https://${host}${path}`, { method }), env);
 }
@@ -409,4 +420,108 @@ test('serves views of the pages of r-universe.dev', async () => {
   assert.deepEqual(await res.json(), { days: 30, pageviews: 25, pages: { '/': 20, '/search': 5 } });
   assert.match(sqlQueries[0].sql, /index1 = '_global' AND blob2 = 'universe'/);
   assert.equal((await getStats('/cf/other', 'r-universe.dev')).status, 404);
+});
+
+// Deployments, as sent by actions/deploy-packages/deploy-r2.sh
+const SHA = '806953e2f92f4109c6a0311430b922fb845888be513922ded23c323757a9c4fb';
+async function sendDeploy(method, path, { headers = {}, body } = {}) {
+  const waits = [];
+  const request = new Request(`https://test${universe}.r-universe.dev${path}`, { method, headers, body });
+  const res = await worker.fetch(request, env, { waitUntil: (p) => waits.push(p) });
+  await Promise.all(waits);
+  return res;
+}
+const COLUMNS = ['time', 'universe', 'package', 'version', 'pkgtype', 'rversion', 'arch', 'distro',
+  'checkstatus', 'sha256', 'run_id', 'buildurl', 'status'];
+function savedRows() {
+  return deployRows.map(({ sql, values }) => {
+    assert.match(sql, /^INSERT INTO deployments/);
+    const row = Object.fromEntries(COLUMNS.map((name, i) => [name, values[i]]));
+    assert.ok(Math.abs(row.time - Date.now() / 1000) < 5);
+    delete row.time;
+    return row;
+  });
+}
+function builder(type, check = 'OK') {
+  return {
+    'Builder-Check': check, 'Builder-Distro': type === 'linux' ? 'noble' : '',
+    'Builder-Buildurl': `https://github.com/r-universe/test${universe}/actions/runs/123456`
+  };
+}
+
+test('records deployments of package files, with R version and architecture of binaries', async () => {
+  const built = {
+    src: undefined,
+    win: { R: '4.5.1', Platform: 'x86_64-w64-mingw32', Date: 'x', OStype: 'windows' },
+    mac: 'R 4.4.2; aarch64-apple-darwin20; 2026-10-24 12:00:00 UTC; unix', // as a string
+    linux: { R: '4.6.0', Platform: '', OStype: 'unix' }, // no compiled code
+    wasm: { R: '4.5.1', Platform: 'wasm32-unknown-emscripten' }
+  };
+  for (const type of Object.keys(built)) {
+    deployResponse = () => Response.json({ Package: 'dplyr', Built: built[type] });
+    const headers = builder(type, type === 'wasm' ? '' : 'WARNING');
+    const res = await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/${type}/${SHA}`, { headers, body: 'downloadurl=x' });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('X-R-Universe-Edge'), 'deploy');
+    assert.equal((await res.json()).Package, 'dplyr'); // passed unchanged
+  }
+  const name = `test${universe}`;
+  const row = { universe: name, package: 'dplyr', version: '1.1.4', distro: null, checkstatus: 'WARNING', sha256: SHA, run_id: 123456, buildurl: null, status: 200 };
+  assert.deepEqual(savedRows(), [
+    { ...row, pkgtype: 'src', rversion: null, arch: null },
+    { ...row, pkgtype: 'win', rversion: '4.5.1', arch: 'x86_64' },
+    { ...row, pkgtype: 'mac', rversion: '4.4.2', arch: 'aarch64' },
+    { ...row, pkgtype: 'linux', rversion: '4.6.0', arch: 'all', distro: 'noble' },
+    { ...row, pkgtype: 'wasm', rversion: '4.5.1', arch: 'wasm32', checkstatus: null }
+  ]);
+  assert.equal(calls.filter(x => x.startsWith('PUT ')).length, 5);
+  assert.ok(!calls.includes('/api/allowlist'));
+  assert.equal(points.length, 0); // not counted as hits
+});
+
+test('records failed deployments and build failures', async () => {
+  deployResponse = () => new Response('Error: invalid package\n', { status: 500 });
+  const res = await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/win/${SHA}`, { headers: builder('win') });
+  assert.equal(res.status, 500);
+  assert.equal(await res.text(), 'Error: invalid package\n');
+
+  deployResponse = () => Response.json({ Package: 'dplyr', _type: 'failure' });
+  const form = new URLSearchParams({
+    'Builder-Distro': 'noble', 'Builder-Host': 'GitHub-Actions',
+    'Builder-Buildurl': `https://github.com/r-universe/test${universe}/actions/runs/789`
+  });
+  assert.equal((await sendDeploy('POST', '/api/packages/dplyr/1.1.4/failure', { body: form })).status, 200);
+
+  // the server is unreachable
+  deployResponse = () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(sendDeploy('PUT', `/api/packages/tidyr/1.3.1/src/${SHA}`, { headers: builder('src') }));
+
+  const row = { universe: `test${universe}`, package: 'dplyr', version: '1.1.4', rversion: null, arch: null, buildurl: null };
+  assert.deepEqual(savedRows(), [
+    { ...row, pkgtype: 'win', distro: null, checkstatus: 'OK', sha256: SHA, run_id: 123456, status: 500 },
+    { ...row, pkgtype: 'failure', distro: 'noble', checkstatus: null, sha256: null, run_id: 789, status: 200 },
+    { ...row, package: 'tidyr', version: '1.3.1', pkgtype: 'src', distro: null, checkstatus: 'OK', sha256: SHA, run_id: 123456, status: 0 }
+  ]);
+});
+
+test('keeps the buildurl of runs in other repositories', async () => {
+  deployResponse = () => Response.json({});
+  const buildurl = 'https://github.com/someone/fork/actions/runs/42';
+  await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/src/${SHA}`, { headers: { 'Builder-Buildurl': buildurl } });
+  await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/src/${SHA}`, { headers: { 'Builder-Buildurl': 'local build' } });
+  await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/src/${SHA}`);
+  assert.deepEqual(savedRows().map(x => [x.run_id, x.buildurl, x.checkstatus]), [
+    [42, buildurl, null], [null, 'local build', null], [null, null, null]
+  ]);
+});
+
+test('passes other uploads without recording them', async () => {
+  deployResponse = () => Response.json({});
+  for (const [method, path] of [['POST', '/api/progress/dplyr'], ['PUT', '/api/packages/dplyr/1.1.4/src'],
+    ['PUT', '/api/packages/dplyr/1.1.4/other/' + SHA], ['POST', `/api/packages/dplyr/1.1.4/src/${SHA}`],
+    ['DELETE', '/api/packages/dplyr']]) {
+    const res = await sendDeploy(method, path, { body: method === 'DELETE' ? undefined : 'x' });
+    assert.equal(res.headers.get('X-R-Universe-Edge'), null, path);
+  }
+  assert.equal(deployRows.length, 0);
 });

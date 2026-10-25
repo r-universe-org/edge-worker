@@ -19,3 +19,10 @@ dataset = "r_universe_hits"
 # token (Account Analytics: Read) is a secret: npx wrangler secret put ANALYTICS_TOKEN
 [vars]
 ANALYTICS_ACCOUNT = "3fcdf4a2e34a7a2e74fc8686b68acea1"
+
+# Every package deployment, see README.md. Created with the cf CLI token (wrangler's has no D1 access).
+[[d1_databases]]
+binding = "DEPLOYS"
+database_name = "r-universe-deployments"
+database_id = "b4ef5717-f330-4e76-bfa0-5e90793643fe"
+migrations_dir = "migrations"

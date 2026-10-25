@@ -7,6 +7,7 @@ This is an *optional* worker that runs on the `r-universe.dev` domains to reduce
  - **Redirect CRAN-style manual urls** `/{package}/{package}.pdf` to `/{package}/doc/manual.pdf`, which search engines request a lot
  - **Count download hits** per universe and package, and page hits on `r-universe.dev`, see below.
  - **Expose stats endpoits** stats `/cf/downloads` and `/cf/pageviews`
+ - **Record every package deployment** in a D1 database, see below.
 
 The worker can be enabled and disabled for certain routes in cloudflare. Everything in R-universe should still work when the router is disabled.
 
@@ -99,6 +100,48 @@ also in browsers, and allow CORS. Errors are not cached. If a universe has a pac
 The SQL API requires an API token with *Account Analytics: Read*, set as a secret of the
 worker: `npx wrangler secret put ANALYTICS_TOKEN`. The account is the variable
 `ANALYTICS_ACCOUNT` in `wrangler.toml`. Without them the endpoints return 503.
+
+## Deployments
+
+Every package deployment (in `src/deploy.js`) is a row in the table `deployments` of the
+[D1](https://developers.cloudflare.com/d1/) database `r-universe-deployments` (binding `DEPLOYS`),
+a permanent record, unlike the hits. Deployments come from `actions/deploy-packages/deploy-r2.sh`:
+
+ - `PUT /api/packages/{package}/{version}/{pkgtype}/{sha256}`: a package file, with `Builder-*` headers.
+ - `POST /api/packages/{package}/{version}/failure`: a failed build, with a form of `Builder-*` fields.
+
+The request and response pass unchanged (with `X-R-Universe-Edge: deploy`), and the row is written
+in the background. Every attempt is a row, so retries and failed deployments are recorded too:
+
+| column        | value |
+|---------------|-------|
+| `time`        | unix seconds |
+| `universe`    | from the hostname |
+| `package`, `version` | from the url |
+| `pkgtype`     | `src`, `win`, `mac`, `linux`, `wasm`, or `failure` |
+| `rversion`    | binaries: `Built.R` from the server's response, e.g. `4.5.1` (the deploy does not send it) |
+| `arch`        | binaries: from `Built.Platform`: `x86_64`, `aarch64`, `wasm32`, or `all` (no compiled code) |
+| `distro`      | `Builder-Distro`, e.g. `noble` for linux |
+| `checkstatus` | `Builder-Check`, none for wasm and failures |
+| `sha256`      | the file, none for failures |
+| `run_id`      | the run in `https://github.com/r-universe/{universe}/actions/runs/{run_id}` |
+| `buildurl`    | only if `Builder-Buildurl` is not a run of that repository |
+| `status`      | HTTP status of the server's response, 0 if the server could not be reached |
+
+Store R versions rather than release names: whether 4.5 is r-release or r-oldrel depends on the date.
+Query with SQL, for example the latest deployments of a package:
+
+```sh
+npx wrangler d1 execute r-universe-deployments --remote --command \
+  "SELECT datetime(time, 'unixepoch'), pkgtype, rversion, arch, checkstatus, status FROM deployments
+   WHERE universe = 'jeroen' AND package = 'jsonlite' ORDER BY time DESC LIMIT 20"
+```
+
+The schema is in `migrations/`: add a file to change it (new columns should be nullable), and apply
+it with `npx wrangler d1 migrations apply r-universe-deployments --remote`. The wrangler login has no
+access to D1: these commands need `CLOUDFLARE_API_TOKEN` with D1 access (such as the token of the
+`cf` CLI). At about 58,000 deployments a day the table grows ~5 GB a year; a D1 database holds at
+most 10 GB, so older rows will need archiving after about two years.
 
 ## Deploy
 

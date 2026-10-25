@@ -1,15 +1,18 @@
-// Cloudflare worker in front of {universe}.r-universe.dev and r-universe.dev, see README.md. It does two things:
+// Cloudflare worker in front of {universe}.r-universe.dev and r-universe.dev, see README.md. It does three things:
 //  1. Reject requests for top-level pages that do not exist (e.g. from security scanners),
 //     using the allowlist of the universe from /api/allowlist: its packages and universe pages.
 //     On r-universe.dev it uses the top-level pages of the site.
 //  2. Count hits per universe and package, in Workers Analytics Engine, and of r-universe.dev as
 //     the universe '_global'. The stats are public on /cf/downloads and /cf/pageviews, see stats.js.
+//  3. Record every package deployment (PUT and failure POST) in D1, see deploy.js.
 // Downloads with a ?sha256= parameter are redirected to the file storage (R2) directly, as are
 // CRAN urls of manuals to the manual on r-universe, and a
 // known crawler fleet is blocked. Everything else goes to the backend unchanged. Responses have
-// a header X-R-Universe-Edge: blocked, redirect, rejected, stats, pass (allowed), or unchecked (no allowlist).
+// a header X-R-Universe-Edge: blocked, redirect, rejected, stats, pass (allowed), unchecked (no allowlist),
+// or deploy.
 
 import { stats, GLOBAL } from './stats.js';
+import { deploy, isDeploy } from './deploy.js';
 
 const UNIVERSE_HOST = /^([a-z0-9-]+)\.r-universe\.dev$/i;
 const GLOBAL_HOST = 'r-universe.dev';
@@ -62,6 +65,9 @@ export default {
       return checkGlobal(request, env, url, ctx);
     }
     const universe = url.hostname.match(UNIVERSE_HOST)?.[1].toLowerCase();
+    if (universe && isDeploy(request, url)) {
+      return mark(await deploy(request, env, ctx, universe, url), 'deploy');
+    }
     if (!universe || (request.method !== 'GET' && request.method !== 'HEAD')) {
       return fetch(request);
     }

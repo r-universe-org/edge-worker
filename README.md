@@ -6,7 +6,7 @@ This is an *optional* worker that runs on the `r-universe.dev` domains to reduce
  - **Redirect sha256 requests directly to R2** without revalidation to speed up package downloads
  - **Redirect CRAN-style manual urls** `/{package}/{package}.pdf` to `/{package}/doc/manual.pdf`, which search engines request a lot
  - **Count download hits** per universe and package, and page hits on `r-universe.dev`, see below.
- - **Expose stats endpoits** stats `/cf/downloads` and `/cf/pageviews`
+ - **Expose stats endpoits** stats `/cf/downloads`, `/cf/pageviews` and `/cf/deployments`
  - **Record every package deployment** in a D1 database, see below.
 
 The worker can be enabled and disabled for certain routes in cloudflare. Everything in R-universe should still work when the router is disabled.
@@ -84,7 +84,9 @@ query the SQL API, so that the frontend and other clients need no token:
    `/packages`, `/badges`, `/api`, `/datasets`, `/contributors`, `/articles`) and of the
    landing pages of the packages, with status 200 or 304.
 
-On `r-universe.dev` the same endpoints show stats of the whole site:
+The deployments of a universe are on `/cf/deployments`, see [Deployments](#deployments).
+
+On `r-universe.dev` the hits endpoints show stats of the whole site:
 
  - `/cf/downloads?days=30&top=100`: downloads of all universes: the total, the number of
    universes with downloads, downloads per platform, and the `top` (1 to 1000) universes
@@ -115,12 +117,13 @@ in the background. Every attempt is a row, so retries and failed deployments are
 
 | column        | value |
 |---------------|-------|
-| `time`        | unix seconds |
+| `time`        | when it was deployed (unix seconds) |
 | `universe`    | from the hostname |
 | `package`, `version` | from the url |
 | `pkgtype`     | `src`, `win`, `mac`, `linux`, `wasm`, or `failure` |
 | `rversion`    | binaries: `Built.R` from the server's response, e.g. `4.5.1` (the deploy does not send it) |
 | `arch`        | binaries: from `Built.Platform`: `x86_64`, `aarch64`, `emscripten` (wasm), or `all` (no compiled code) |
+| `created`     | when the package was created: `Built.Date` of binaries, `Packaged.Date` of source packages (unix seconds) |
 | `distro`      | `Builder-Distro`, e.g. `noble` for linux |
 | `checkstatus` | `Builder-Check`, none for wasm and failures |
 | `sha256`      | the file, none for failures |
@@ -128,7 +131,16 @@ in the background. Every attempt is a row, so retries and failed deployments are
 | `buildurl`    | only if `Builder-Buildurl` is not a run of that repository |
 | `status`      | HTTP status of the server's response, 0 if the server could not be reached |
 
-Store R versions rather than release names: whether 4.5 is r-release or r-oldrel depends on the date.
+`created` can be much earlier than `time`: binaries are deployed after all builds, and retries and
+reruns deploy the same file again. Store R versions rather than release names: whether 4.5 is
+r-release or r-oldrel depends on the date.
+
+They are public on `/cf/deployments?days=30&limit=100&package=` of each universe (in `src/stats.js`):
+the latest deployments of the universe, or of one package (its exact name), newest first, with
+`time` and `created` as ISO dates and the `buildurl` instead of the `run_id`. `days` is 1 to 3650 (default 30),
+`limit` 1 to 1000 (default 100). Responses are cached for 5 minutes, and allow CORS. For example
+https://jeroen.r-universe.dev/cf/deployments?package=curl.
+
 Query with SQL, for example the latest deployments of a package:
 
 ```sh

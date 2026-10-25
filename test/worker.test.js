@@ -33,7 +33,7 @@ beforeEach(() => {
   list = { packages: ['data.table', 'dplyr', 'rappArmor', 'tidyr'], universe: ['', 'api', 'bin', 'builds', 'card.png', 'src'] };
   calls = []; points = [];
   sqlRows = []; sqlQueries = [];
-  deployResponse = undefined; deployRows = [];
+  deployResponse = undefined; deployRows = []; deployQueries = []; deployResults = [];
 });
 
 // A fake edge cache
@@ -47,8 +47,12 @@ globalThis.caches = { default: {
 let deployRows;
 const env = {
   HITS: { writeDataPoint: (point) => points.push(point) },
-  DEPLOYS: { prepare: (sql) => ({ bind: (...values) => ({ run: async () => deployRows.push({ sql, values }) }) }) }
+  DEPLOYS: { prepare: (sql) => ({ bind: (...values) => ({
+    run: async () => deployRows.push({ sql, values }),
+    all: async () => { deployQueries.push({ sql, values }); return { results: deployResults }; }
+  }) }) }
 };
+let deployQueries = [], deployResults = [];
 function get(path, method = 'GET', host = `test${universe}.r-universe.dev`) {
   return worker.fetch(new Request(`https://${host}${path}`, { method }), env);
 }
@@ -365,6 +369,7 @@ test('stats errors are not cached', async () => {
 
 test('stats for unknown types, universes, and without a token', async () => {
   assert.equal((await getStats('/cf/other')).status, 404);
+  assert.match(await (await getStats('/cf/other')).text(), /\/cf\/deployments/);
   assert.equal((await getStats('/cf/downloads/x')).status, 404);
   const res = await worker.fetch(new Request(`https://test${universe}.r-universe.dev/cf/pageviews`), env);
   assert.equal(res.status, 503);
@@ -431,7 +436,7 @@ async function sendDeploy(method, path, { headers = {}, body } = {}) {
   await Promise.all(waits);
   return res;
 }
-const COLUMNS = ['time', 'universe', 'package', 'version', 'pkgtype', 'rversion', 'arch', 'distro',
+const COLUMNS = ['time', 'universe', 'package', 'version', 'pkgtype', 'rversion', 'arch', 'created', 'distro',
   'checkstatus', 'sha256', 'run_id', 'buildurl', 'status'];
 function savedRows() {
   return deployRows.map(({ sql, values }) => {
@@ -449,16 +454,17 @@ function builder(type, check = 'OK') {
   };
 }
 
-test('records deployments of package files, with R version and architecture of binaries', async () => {
+test('records deployments of package files, with R version, architecture and creation date', async () => {
+  const packaged = { Date: '2026-10-24 10:00:00 UTC', User: 'root' }; // source packages, and kept in binaries
   const built = {
     src: undefined,
-    win: { R: '4.5.1', Platform: 'x86_64-w64-mingw32', Date: 'x', OStype: 'windows' },
+    win: { R: '4.5.1', Platform: 'x86_64-w64-mingw32', Date: '2026-10-24 11:00:00 UTC', OStype: 'windows' },
     mac: 'R 4.4.2; aarch64-apple-darwin20; 2026-10-24 12:00:00 UTC; unix', // as a string
-    linux: { R: '4.6.0', Platform: '', OStype: 'unix' }, // no compiled code
-    wasm: { R: '4.6.0', Platform: 'emscripten' }
+    linux: { R: '4.6.0', Platform: '', Date: '2026-10-24 13:00:00 UTC', OStype: 'unix' }, // no compiled code
+    wasm: { R: '4.6.0', Platform: 'emscripten', Date: 'not a date' }
   };
   for (const type of Object.keys(built)) {
-    deployResponse = () => Response.json({ Package: 'dplyr', Built: built[type] });
+    deployResponse = () => Response.json({ Package: 'dplyr', Packaged: packaged, Built: built[type] });
     const headers = builder(type, type === 'wasm' ? '' : 'WARNING');
     const res = await sendDeploy('PUT', `/api/packages/dplyr/1.1.4/${type}/${SHA}`, { headers, body: 'downloadurl=x' });
     assert.equal(res.status, 200);
@@ -467,12 +473,13 @@ test('records deployments of package files, with R version and architecture of b
   }
   const name = `test${universe}`;
   const row = { universe: name, package: 'dplyr', version: '1.1.4', distro: null, checkstatus: 'WARNING', sha256: SHA, run_id: 123456, buildurl: null, status: 200 };
+  const date = (x) => Date.parse(`2026-10-24T${x}:00:00Z`) / 1000;
   assert.deepEqual(savedRows(), [
-    { ...row, pkgtype: 'src', rversion: null, arch: null },
-    { ...row, pkgtype: 'win', rversion: '4.5.1', arch: 'x86_64' },
-    { ...row, pkgtype: 'mac', rversion: '4.4.2', arch: 'aarch64' },
-    { ...row, pkgtype: 'linux', rversion: '4.6.0', arch: 'all', distro: 'noble' },
-    { ...row, pkgtype: 'wasm', rversion: '4.6.0', arch: 'emscripten', checkstatus: null }
+    { ...row, pkgtype: 'src', rversion: null, arch: null, created: date(10) },
+    { ...row, pkgtype: 'win', rversion: '4.5.1', arch: 'x86_64', created: date(11) },
+    { ...row, pkgtype: 'mac', rversion: '4.4.2', arch: 'aarch64', created: date(12) },
+    { ...row, pkgtype: 'linux', rversion: '4.6.0', arch: 'all', created: date(13), distro: 'noble' },
+    { ...row, pkgtype: 'wasm', rversion: '4.6.0', arch: 'emscripten', created: null, checkstatus: null }
   ]);
   assert.equal(calls.filter(x => x.startsWith('PUT ')).length, 5);
   assert.ok(!calls.includes('/api/allowlist'));
@@ -496,7 +503,7 @@ test('records failed deployments and build failures', async () => {
   deployResponse = () => { throw new TypeError('fetch failed'); };
   await assert.rejects(sendDeploy('PUT', `/api/packages/tidyr/1.3.1/src/${SHA}`, { headers: builder('src') }));
 
-  const row = { universe: `test${universe}`, package: 'dplyr', version: '1.1.4', rversion: null, arch: null, buildurl: null };
+  const row = { universe: `test${universe}`, package: 'dplyr', version: '1.1.4', rversion: null, arch: null, created: null, buildurl: null };
   assert.deepEqual(savedRows(), [
     { ...row, pkgtype: 'win', distro: null, checkstatus: 'OK', sha256: SHA, run_id: 123456, status: 500 },
     { ...row, pkgtype: 'failure', distro: 'noble', checkstatus: null, sha256: null, run_id: 789, status: 200 },
@@ -524,4 +531,54 @@ test('passes other uploads without recording them', async () => {
     assert.equal(res.headers.get('X-R-Universe-Edge'), null, path);
   }
   assert.equal(deployRows.length, 0);
+});
+
+test('serves the latest deployments of a universe or package', async () => {
+  const name = `test${universe}`;
+  deployResults = [
+    { time: 1792940000, package: 'curl', version: '8.1.0', pkgtype: 'win', rversion: '4.6.1', arch: 'x86_64', created: 1792936400, distro: 'windows',
+      checkstatus: 'OK', sha256: SHA, run_id: 123, buildurl: null, status: 200 },
+    { time: 1792930000, package: 'curl', version: '8.1.0', pkgtype: 'failure', rversion: null, arch: null, created: null, distro: 'noble',
+      checkstatus: null, sha256: null, run_id: 42, buildurl: 'https://github.com/someone/fork/actions/runs/42', status: 200 },
+    { time: 1792920000, package: 'curl', version: '8.0.0', pkgtype: 'src', rversion: null, arch: null, created: null, distro: null,
+      checkstatus: null, sha256: SHA, run_id: null, buildurl: null, status: 500 }
+  ];
+  const res = await getStats('/cf/deployments?package=curl&days=7&limit=3');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('X-R-Universe-Edge'), 'stats');
+  assert.equal(res.headers.get('Cache-Control'), 'public, max-age=300');
+  const body = await res.json();
+  assert.deepEqual({ ...body, deployments: body.deployments.map(x => [x.time, x.pkgtype, x.created, x.buildurl, x.status]) }, {
+    universe: name, days: 7, limit: 3, package: 'curl', deployments: [
+      ['2026-10-25T14:53:20.000Z', 'win', '2026-10-25T13:53:20.000Z', `https://github.com/r-universe/${name}/actions/runs/123`, 200],
+      ['2026-10-25T12:06:40.000Z', 'failure', null, 'https://github.com/someone/fork/actions/runs/42', 200],
+      ['2026-10-25T09:20:00.000Z', 'src', null, null, 500]
+    ]
+  });
+  assert.deepEqual(Object.keys(body.deployments[0]), ['time', 'package', 'version', 'pkgtype', 'rversion', 'arch',
+    'created', 'distro', 'checkstatus', 'sha256', 'buildurl', 'status']);
+  const [q] = deployQueries;
+  assert.match(q.sql, /WHERE universe = \? AND time > \?\s+AND package = \? ORDER BY time DESC LIMIT \?/);
+  assert.equal(q.values[0], name);
+  assert.ok(Math.abs(q.values[1] - (Date.now() / 1000 - 7 * 86400)) < 5);
+  assert.deepEqual(q.values.slice(2), ['curl', 3]);
+
+  // the whole universe, with defaults and limits, cached per options
+  for (const path of ['/cf/deployments', '/cf/deployments?days=30&limit=100', '/cf/deployments?days=99999&limit=99999']) {
+    assert.equal((await getStats(path)).status, 200);
+  }
+  assert.deepEqual(deployQueries.slice(1).map(x => [x.values.length, x.values.at(-1)]), [[3, 100], [3, 1000]]);
+  assert.ok(Math.abs(deployQueries[2].values[1] - (Date.now() / 1000 - 3650 * 86400)) < 5);
+  assert.doesNotMatch(deployQueries[1].sql, /package = /);
+  assert.equal(sqlQueries.length, 0); // not Analytics Engine
+});
+
+test('deployments without the database, and not on r-universe.dev', async () => {
+  const res = await worker.fetch(new Request(`https://test${universe}.r-universe.dev/cf/deployments`), statsEnv);
+  assert.equal(res.status, 200); // statsEnv has DEPLOYS
+  const noDb = await worker.fetch(new Request(`https://test${universe}.r-universe.dev/cf/deployments?days=2`), { ...statsEnv, DEPLOYS: undefined });
+  assert.equal(noDb.status, 503);
+  assert.match(await noDb.text(), /DEPLOYS/);
+  list = { packages: [], universe: [''] };
+  assert.equal((await getStats('/cf/deployments', 'r-universe.dev')).status, 404);
 });
